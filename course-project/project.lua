@@ -60,11 +60,18 @@ local CB = lpeg.P("}") * whitespace
 local OP = lpeg.P("(") * whitespace
 local CP = lpeg.P(")") * whitespace
 
--- Patterns for comma (funcDef and funcCall)
+-- Pattern for comma (funcDef and funcCall and expressions)
 local comma = lpeg.P(",") * whitespace
 
+-- Patterns for square brackets
+local OS = lpeg.P("[") * whitespace
+local CS = lpeg.P("]") * whitespace
+
+-- Pattern for print
+local PRT = lpeg.P("@") * whitespace
+
 -- List of keywords
-local keywords = { "and", "or", "if", "elseif", "else", "while", "do", "function"}
+local keywords = { "and", "or", "if", "elseif", "else", "while", "do", "function", "local", "new", "return"}
 local reserved_words = keywords
 local reserved_words_pattern = lpeg.P(false)
 for i = 1,#reserved_words do
@@ -136,6 +143,14 @@ local function oneBinaryOp(lst)
 	return tree
 end
 
+local function foldIndex(lst)
+	local tree = lst[1]
+	for i = 2,#lst do
+		tree = { tag = "array", array = tree, index = lst[i]}
+	end
+	return tree
+end
+
 local start_id = -1
 local stop_id = -1
 ID = lpeg.C(alphaUnderscore *
@@ -173,6 +188,11 @@ local ifelsestat = lpeg.V"ifelsestat"
 local ifstat = lpeg.V"ifstat"
 local elsestat = lpeg.V"elsestat"
 local funcDef = lpeg.V"funcDef"
+local funcCall = lpeg.V"funcCall"
+local array = lpeg.V"array"
+local base = lpeg.V"base"
+local exponent = lpeg.V"exponent"
+local prt = lpeg.V"prt"
 
 Compiler = {grammar = {}, ast = {}, code = {}}
 function Compiler:astNode(tag, ...)
@@ -190,14 +210,18 @@ local grammar = lpeg.P{"prog",
 			prog = whitespace
 				* lpeg.Ct(funcDef ^ 1) / Compiler:astNode("program", "funcDefList")
 				* whitespace,
-			powerExp = lpeg.Ct(((ID / Compiler:astNode("var", "name")
-				+ number / Compiler:astNode("numericLiteral", "value"))
-				* ((lpeg.C(opExpo) 
-				* (ID / Compiler:astNode("var", "name")
-					+ integer / Compiler:astNode("numericLiteral", "value")))^0)))
-						/ foldBin, 
+			base = array 
+				+ funcCall 
+				+ (ID / Compiler:astNode("var", "name"))
+				+ (number / Compiler:astNode("numericLiteral", "value")),
+			exponent = array 
+				+ funcCall
+				+ (ID / Compiler:astNode("var", "name")) 
+				+ (integer / Compiler:astNode("numericLiteral", "value")),
+			powerExp = lpeg.Ct(base * ((lpeg.C(opExpo) * exponent)^0))
+					/ foldBin,
 			unaryExp = lpeg.Ct(((lpeg.C(opSign)) ^ 0) * powerExp)
-						/ foldUnary,
+					/ foldUnary,
 			multExp = lpeg.Ct((unaryExp * ((lpeg.C(opMul) * unaryExp)^0)))
 					/ foldBin, 
 			addExp = lpeg.Ct((multExp * ((lpeg.C(opAdd) * multExp)^0)))
@@ -206,7 +230,13 @@ local grammar = lpeg.P{"prog",
 					/ oneBinaryOp,
 			rvalue = lpeg.Ct((relExp * ((lpeg.C(opLogical) * relExp)^0)))
 					/ foldBin,
-			lvalue = ID/Compiler:astNode("var", "name"),
+			lvalue = ((KEYWORD("local") * array) / Compiler:astNode("lvar", "array")) 
+					+ ((KEYWORD("local") * ID) / Compiler:astNode("lvar", "name"))
+					+ array
+					+ (ID / Compiler:astNode("var", "name")),
+			funcCall = (ID * OP * lpeg.Ct((rvalue * ((comma * rvalue) ^ 0))^0) * CP)
+					/ Compiler:astNode("funcCall", "funcName", "argList"),
+			array = lpeg.Ct(ID * ((OS * rvalue * CS) ^ 1)) / foldIndex,
                         -- lvalue and rvalue all by themselves are valid statements
 			ifelseifstat = 
 			                OP 
@@ -231,8 +261,10 @@ local grammar = lpeg.P{"prog",
 			elsestat = KEYWORD("else") 
 					* block
 					/ Compiler:astNode("else2", "elseblock"),
-                        stat = ((lvalue * opAssign * rvalue)
-					/ Compiler:astNode("assign", "lvalue", "rvalue")
+                        stat = (lvalue * opAssign * KEYWORD("new") * array
+					/ Compiler:astNode("newArray", "lvalue", "indexList"))
+				+ (lvalue * opAssign * rvalue
+					/ Compiler:astNode("assign", "lvalue", "rvalue"))
 				+ KEYWORD("while") * OP
 					* rvalue
 					* CP
@@ -246,8 +278,9 @@ local grammar = lpeg.P{"prog",
 					* CP
 					/ Compiler:astNode("dowhilestat", "loop", "predExp")
 				+ KEYWORD("if") * (ifelseifstat + ifelsestat + ifstat)
-				+ lvalue
-			        + rvalue),
+				+ (PRT * rvalue) / Compiler:astNode("prt", "rvalue")
+				+ (KEYWORD("return") * (rvalue^0)) / Compiler:astNode("return", "rvalue")
+			        + rvalue, -- lvalue cannot occur by itselfi but rvalue can
 			stats = stat * ((separator^1) * stat) ^ 0,  -- multiple separators ;;;; are legal
                         -- ; after block is legal
                         -- empty block is legal
