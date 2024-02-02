@@ -206,11 +206,13 @@ local base = lpeg.V"base"
 local exponent = lpeg.V"exponent"
 local prt = lpeg.V"prt"
 
-Compiler = {grammar = {}, ast = {}, funcDefs = {}, funcAddr = {}, globals = {}, nglobals = 0, locals = {}, blkNest = 0,
-            expOpcodes = { ["+"] = "add", ["-"] = "sub", ["/"] = "div", ["*"] = "mul", ["%"] = "mode",
-	                   ["<="] = "leq", ["<"] = "lt", [">="] = "geq", [">"] = "gt", ["=="] = "eq", ["!="] = "neq"}
-	   }
-function Compiler:astNode(tag, ...)
+PUG = {
+	grammar = {}, ast = {}, funcDefs = {}, funcAddr = {}, globals = {}, nglobals = 0, locals = {}, blkNest = 0,
+        expOpcodes = { ["+"] = "add", ["-"] = "sub", ["/"] = "div", ["*"] = "mul", ["%"] = "mode",
+	               ["<="] = "leq", ["<"] = "lt", [">="] = "geq", [">"] = "gt", ["=="] = "eq", ["!="] = "neq"},
+	stack = {}, mem = {}
+      }
+function PUG:astNode(tag, ...)
 	local lst = table.pack(...) -- generate a list from varargs
 	local params_str = table.concat(lst, ", ") -- create a string containing comma separated varargs
         -- create varargs[i] = varargs[i] name value pairs in a string
@@ -223,16 +225,16 @@ end
 -- Grammar for the pug language.
 local grammar = lpeg.P{"prog",
 			prog = whitespace
-				* lpeg.Ct(funcDef ^ 1) / Compiler:astNode("program", "funcDefList")
+				* lpeg.Ct(funcDef ^ 1) / PUG:astNode("program", "funcDefList")
 				* whitespace,
 			base = array 
 				+ funcCall 
-				+ (ID / Compiler:astNode("var", "name"))
-				+ (number / Compiler:astNode("numericLiteral", "value")),
+				+ (ID / PUG:astNode("var", "name"))
+				+ (number / PUG:astNode("numericLiteral", "value")),
 			exponent = array 
 				+ funcCall
-				+ (ID / Compiler:astNode("var", "name")) 
-				+ (integer / Compiler:astNode("numericLiteral", "value")),
+				+ (ID / PUG:astNode("var", "name")) 
+				+ (integer / PUG:astNode("numericLiteral", "value")),
 			powerExp = lpeg.Ct(base * ((opExpo * exponent)^0))
 					/ foldBin,
 			unaryExp = lpeg.Ct(((opSign) ^ 0) * powerExp)
@@ -246,12 +248,12 @@ local grammar = lpeg.P{"prog",
 			rvalue = newarray
 				 + (lpeg.Ct((relExp * ((opLogical * relExp)^0)))
 					/ foldBin),
-			lvalue = ((KEYWORD("local") * array) / Compiler:astNode("lvar", "array")) 
-					+ ((KEYWORD("local") * ID) / Compiler:astNode("lvar", "name"))
+			lvalue = ((KEYWORD("local") * array) / PUG:astNode("lvar", "array")) 
+					+ ((KEYWORD("local") * ID) / PUG:astNode("lvar", "name"))
 					+ array
-					+ (ID / Compiler:astNode("var", "name")),
+					+ (ID / PUG:astNode("var", "name")),
 			funcCall = (ID * OP * lpeg.Ct((rvalue * ((comma * rvalue) ^ 0))^0) * CP)
-					/ Compiler:astNode("funcCall", "funcName", "argsList"),
+					/ PUG:astNode("funcCall", "funcName", "argsList"),
 			array = lpeg.Ct(ID * ((OS * rvalue * CS) ^ 1)) / foldIndex,
 			newarray = KEYWORD("new") * lpeg.Ct((OS * rvalue * CS) ^ 1) / foldNewIndex,
                         -- lvalue and rvalue all by themselves are valid statements
@@ -261,63 +263,63 @@ local grammar = lpeg.P{"prog",
 					* CP
 					* block
 					* KEYWORD("elseif") * (ifelseifstat + ifelsestat + ifstat) -- order
-					/ Compiler:astNode("ifstat", "predExp", "ifblock", "elseifstat"),
+					/ PUG:astNode("ifstat", "predExp", "ifblock", "elseifstat"),
 			ifelsestat = 
 			                OP 
 					* rvalue
 					* CP
 					* block
 					* elsestat
-					/ Compiler:astNode("ifistat", "predExp", "ifblock", "elsestat"),
+					/ PUG:astNode("ifistat", "predExp", "ifblock", "elsestat"),
 			ifstat = 
 			                OP 
 					* rvalue
 					* CP
 					* block
-					/ Compiler:astNode("ifstat", "predExp", "ifblock"),
+					/ PUG:astNode("ifstat", "predExp", "ifblock"),
 			elsestat = KEYWORD("else") 
 					* block
-					/ Compiler:astNode("elsestat", "elseblock"),
+					/ PUG:astNode("elsestat", "elseblock"),
                         stat = (lvalue * opAssign * rvalue
-					/ Compiler:astNode("assign", "lvalue", "rvalue"))
+					/ PUG:astNode("assign", "lvalue", "rvalue"))
 				+ KEYWORD("while") * OP
 					* rvalue
 					* CP
 					* block
-					/ Compiler:astNode("whilestat", "predExp", "loop")
+					/ PUG:astNode("whilestat", "predExp", "loop")
 				+ KEYWORD("do")
 					* block
 					* KEYWORD("while")
 					* OP
 					* rvalue
 					* CP
-					/ Compiler:astNode("dowhilestat", "loop", "predExp")
+					/ PUG:astNode("dowhilestat", "loop", "predExp")
 				+ KEYWORD("if") * (ifelseifstat + ifelsestat + ifstat)
-				+ (PRT * rvalue) / Compiler:astNode("prt", "rvalue")
-				+ (KEYWORD("return") * (rvalue^0)) / Compiler:astNode("returnstat", "rvalue")
+				+ (PRT * rvalue) / PUG:astNode("prt", "rvalue")
+				+ (KEYWORD("return") * (rvalue^0)) / PUG:astNode("returnstat", "rvalue")
 			        + rvalue, -- lvalue cannot occur by itself but rvalue can
 			stats = lpeg.Ct(stat * ((separator^1) * stat) ^ 0),  -- multiple separators ;;;; are legal
                         -- ; after block is legal
                         -- empty block is legal
-			block = OB * stats^0 * CB * (separator^0) / Compiler:astNode("block", "stats"),
+			block = OB * stats^-1 * CB * (separator^0) / PUG:astNode("block", "stats"),
 			funcDef = (KEYWORD("function")
 					* ID 
 					* OP * lpeg.Ct((ID * (comma * ID)^0)^0) * CP
 					* block
-					) / Compiler:astNode("funcDef", "funcName", "paramsList", "body")
+					) / PUG:astNode("funcDef", "funcName", "paramsList", "body")
 		}
 
-Compiler.grammar = grammar * -1
+PUG.grammar = grammar * -1
 
-function Compiler:parse(text)
+function PUG:parse(text)
 	self.ast = self.grammar:match(text)
 	-- tricky - cannot use 'not' here since ast may be a boolean value
 	if self.ast == nil then
-		print("Syntax Error: Failed to parse pug program")
+		print("SyntaxError: Failed to parse pug program")
 	end
 end
 
-function Compiler:codeInstr(opcode)
+function PUG:codeInstr(opcode)
 	if not opcode then
 		error("Codegen Error: opcode is nil in instruction code gen")
 	end
@@ -328,7 +330,7 @@ function Compiler:codeInstr(opcode)
 	code[#code + 1] = opcode
 end
 
-function Compiler:codeImm(num)
+function PUG:codeImm(num)
 	if not num then
 		error("Codegen Error: imediate value is nil in imediate value code gen")
 	end
@@ -339,7 +341,7 @@ function Compiler:codeImm(num)
 	code[#code + 1] = num
 end
 
-function Compiler:codeGenIndexTree(ast)
+function PUG:codeGenIndexTree(ast)
 	if ast.tag ~= "arrayIndex" then
 		error("CodeGen error - malformed ast - indextree ast has no arrayIndex tag: " .. ast.tag)
 	elseif not ast.index then
@@ -352,7 +354,7 @@ function Compiler:codeGenIndexTree(ast)
 	end
 end
 
-function Compiler:codeGenFuncCall(ast)
+function PUG:codeGenFuncCall(ast)
 	if ast.tag ~= "funcCall" then
 		error("CodeGen error - malformed ast - function call ast has no funcCall tag: " .. ast.tag)
 	end
@@ -366,7 +368,7 @@ function Compiler:codeGenFuncCall(ast)
 	for i = #ast.argsList,1,-1 do
 		self:codeGenExp(ast.argsList[i]) -- Generate arguments on stack in reverse order
 	end
-	for i = 1, #funcDef.params do
+	for i = 1, #funcDef.locals do
 		self:codeInstr("push") -- Push to create space for local parameters
 		self:codeImm(0)
 	end
@@ -375,7 +377,7 @@ function Compiler:codeGenFuncCall(ast)
 end
 	
 
-function Compiler:codeGenExp(ast)
+function PUG:codeGenExp(ast)
 	if ast.tag == "var" then
 		-- locals, then function parameters then globals
 		local resolved = false
@@ -422,7 +424,7 @@ function Compiler:codeGenExp(ast)
 end
 
 
-function Compiler:codeGenLvalue(ast)
+function PUG:codeGenLvalue(ast)
 	if ast.tag == "var" then
 		if not self.globals[ast.name] then
 		    self.nglobals = self.nglobals + 1
@@ -442,7 +444,7 @@ function Compiler:codeGenLvalue(ast)
 
 end
 
-function Compiler:codeGenStat(ast)
+function PUG:codeGenStat(ast)
 	if ast.tag == "assign" then
 		self:codeGenExp(ast.rvalue)
 		self:codeGenLvalue(ast.lvalue)
@@ -471,7 +473,7 @@ function Compiler:codeGenStat(ast)
 	
 end
 
-function Compiler:codeGenBlock(ast)
+function PUG:codeGenBlock(ast)
 	if ast.tag ~= "block" then
 		error("CodeGen error: ast is malformed - no block ast tag at block level")
 	end
@@ -483,7 +485,7 @@ function Compiler:codeGenBlock(ast)
 	end
 end
 
-function Compiler:codeGenFunc(ast)
+function PUG:codeGenFunc(ast)
 	if ast.tag ~= "funcDef" then
 		error("CodeGen error: ast is malformed - no funcDef ast tag at function level")
 	end
@@ -503,14 +505,14 @@ function Compiler:codeGenFunc(ast)
 		error("CodeGen error: ast is malformed - no body ast tag in function: " .. funcName)
 	end
 	self:codeGenBlock(ast.body)
-	-- code to return a return value for a function in the even it does not have an explicit return
+	-- code to return a return value for a function in the event it does not have an explicit return
 	self:codeInstr("push")
 	self:codeImm(0)
 	self:codeInstr("ret")
 	self:codeImm(#self.params + #self.locals) -- pop argument to ret - number of funcparams and locals
-	print(pt.pt(Compiler.code))
+	print(pt.pt(PUG.code))
 end
-function Compiler:codeGen(ast)
+function PUG:codeGen(ast)
 	if ast.tag ~= "program" then
 		error("CodeGen error: ast is malformed - no program ast tag at root level")
 	end
@@ -519,7 +521,65 @@ function Compiler:codeGen(ast)
 	end
 end
 
+function PUG:runFunc(funcDef, top)
+	local pc = 1
+	local code = funcDef.code
+	local base = top
+
+	while true do
+		if code[pc] == "ret" then
+			local retval = self.stack[top]
+			top = top - code[pc+1]
+			self.stack[top] = retval
+			pc = pc + 2
+			return top
+		elseif code[pc] == "push" then
+			top = top + 1
+			self.stack[top] = code[pc+1]
+			pc = pc + 2
+		elseif code[pc] == "call" then
+			local funcName = self.funcAddr[code[pc+1]]
+			if not funcName then
+				error("RuntimeError: undefined function address invoked: " .. code[pc+1])
+			end
+			local funcDef = self.funcDefs[funcName]
+			top = self:runFunc(funcDef, top)
+			pc = pc + 2
+		elseif code[pc] == "pload" then
+			value = self.stack[base - #funcDef.locals - code[pc+1]]
+			top = top + 1
+			self.stack[top] = value
+			pc = pc + 2
+		elseif code[pc] == "lstore" then
+			self.stack[base - code[pc+1]] = self.stack[top]
+			top = top - 1
+			pc = pc + 2
+		elseif code[pc] == "prt" then
+			print(self.stack[top])
+			top = top - 1
+			pc = pc + 1 
+		else
+			error("RuntimeError: unsupported opcode: " .. code[pc])
+		end
+	end
+end
+	
+
+function PUG:runVM()
+	local top = 0
+
+	top = self:runFunc(self.funcDefs["main"], top)
+	if top == nil or top ~= 1 then
+		error("RuntimeError:  stack top is not 1 on program exit: " .. top)
+	end
+	print("PUG program ran successfully. Return code is: " .. self.stack[1])
+	self.stack = {}
+	self.mem = {}
+	self.code = {}
+end
+
 local input = io.read("*a")
-Compiler:parse(input)
-print(pt.pt(Compiler.ast))
-Compiler:codeGen(Compiler.ast)
+PUG:parse(input)
+print(pt.pt(PUG.ast))
+PUG:codeGen(PUG.ast)
+PUG:runVM()
