@@ -341,17 +341,19 @@ function PUG:codeImm(num)
 	code[#code + 1] = num
 end
 
-function PUG:codeGenIndexTree(ast)
+function PUG:codeGenIndexTree(ast, dim)
 	if ast.tag ~= "arrayIndex" then
 		error("CodeGen error - malformed ast - indextree ast has no arrayIndex tag: " .. ast.tag)
 	elseif not ast.index then
 		error("CodeGen error - malformed ast - indextree ast has no index member")
 	else
 		self:codeGenExp(ast.index)
+		dim = dim + 1
 		if ast.indexTree then
-			self:codeGenIndexTree(ast.indexTree)
+			dim = self:codeGenIndexTree(ast.indexTree, dim)
 		end
 	end
+	return dim
 end
 
 function PUG:codeGenFuncCall(ast)
@@ -412,7 +414,9 @@ function PUG:codeGenExp(ast)
 		self:codeGenExp(ast.exp2)
 		self:codeInstr(self.expOpcodes[ast.op])
 	elseif ast.tag == "newarray" then
-		self:codeGenIndexTree(ast.indexTree)
+		local dim = self:codeGenIndexTree(ast.indexTree, 0)
+		self:codeInstr("newarray")
+		self:codeImm(dim)
 	elseif ast.tag == "funcCall" then
 		self:codeGenFuncCall(ast)
 	elseif ast.tag == "numericLiteral" then
@@ -422,7 +426,6 @@ function PUG:codeGenExp(ast)
 		error("CodeGen error - malformed ast - unrecognized ast tag: " .. ast.tag)
 	end
 end
-
 
 function PUG:codeGenLvalue(ast)
 	if ast.tag == "var" then
@@ -485,7 +488,7 @@ function PUG:codeGenBlock(ast)
 	end
 end
 
-function PUG:codeGenFunc(ast)
+function PUG:codeGenFuncDef(ast)
 	if ast.tag ~= "funcDef" then
 		error("CodeGen error: ast is malformed - no funcDef ast tag at function level")
 	end
@@ -498,6 +501,10 @@ function PUG:codeGenFunc(ast)
 	funcDef.code = {}
 	funcDef.locals = {}
 	funcDef.funcAddr = #self.funcAddr
+	-- main cannot take any params
+	if funcName == "main" and #funcDef.params ~= 0 then
+		error("CodeGenError: main() cannot take any parameters")
+	end
 	self.params = funcDef.params
 	self.code = funcDef.code 
 	self.locals = funcDef.locals
@@ -516,8 +523,21 @@ function PUG:codeGen(ast)
 	if ast.tag ~= "program" then
 		error("CodeGen error: ast is malformed - no program ast tag at root level")
 	end
-	for i = 1,#(ast.funcDefList) do
-		self:codeGenFunc(ast.funcDefList[i])
+	for i = 1,#ast.funcDefList do
+		self:codeGenFuncDef(ast.funcDefList[i])
+	end
+	-- Note no func call to main since main cannot take parameters in the PUG language
+end
+
+
+function PUG:runArrayAlloc(basearray, top, curdim)
+	for i = 1,self.stack[top - curdim + 1] do
+		if curdim == 1 then
+			basearray[i] = 0
+		else
+			basearray[i] = {}
+			self:runArrayAlloc(basearray[i], top, curdim-1)
+		end
 	end
 end
 
@@ -548,12 +568,12 @@ function PUG:runFunc(funcDef, top)
 			top = self:runFunc(funcDef, top)
 			pc = pc + 2
 		elseif code[pc] == "pload" then
-			value = self.stack[base - #funcDef.locals - code[pc+1]]
+			value = self.stack[base - #funcDef.locals - code[pc+1] + 1]
 			top = top + 1
 			self.stack[top] = value
 			pc = pc + 2
 		elseif code[pc] == "lstore" then
-			self.stack[base - code[pc+1]] = self.stack[top]
+			self.stack[base - code[pc+1] + 1] = self.stack[top]
 			top = top - 1
 			pc = pc + 2
 		elseif code[pc] == "prt" then
@@ -562,14 +582,18 @@ function PUG:runFunc(funcDef, top)
 			pc = pc + 1 
 		elseif code[pc] == "lload" then
 			top = top + 1
-			self.stack[top] = self.stack[base - code[pc+1]]
+			self.stack[top] = self.stack[base - code[pc+1] + 1]
 			pc = pc + 2
 		elseif code[pc] == "store" then
 			self.mem[code[pc+1]] = self.stack[top]
-			print(pt.pt(self.mem))
-			print(self.stack[top])
-			print(pt.pt(self.stack))
-			top = top -1
+			top = top - 1
+			pc = pc + 2
+		elseif code[pc] == "newarray" then
+			array = {}
+			self:runArrayAlloc(array, top, code[pc+1])
+			top = top - code[pc+1]
+			top = top + 1
+			self.stack[top] = array
 			pc = pc + 2
 		else
 			error("RuntimeError: unsupported opcode: " .. code[pc])
@@ -587,8 +611,7 @@ function PUG:runVM()
 		error("RuntimeError:  stack top is not 1 on program exit: " .. top)
 	end
 	print("PUG program ran successfully. Return value to lua interpreter is: " .. self.stack[1])
-	print("Memory contents just before termination: ")
-	print(pt.pt(self.mem))
+	print("Memory contents after program termination ========> " .. pt.pt(self.mem))
 	self.stack = {}
 	self.mem = {}
 	self.code = {}
