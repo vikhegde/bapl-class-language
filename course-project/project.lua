@@ -541,6 +541,8 @@ function PUG:runFunc(funcDef, top)
 			local funcName = self.funcAddr[code[pc+1]]
 			if not funcName then
 				error("RuntimeError: undefined function address invoked: " .. code[pc+1])
+			else
+				print("Running code for function: " .. funcName)
 			end
 			local funcDef = self.funcDefs[funcName]
 			top = self:runFunc(funcDef, top)
@@ -555,9 +557,20 @@ function PUG:runFunc(funcDef, top)
 			top = top - 1
 			pc = pc + 2
 		elseif code[pc] == "prt" then
-			print(self.stack[top])
+			print("PUG stdout: =========> " .. self.stack[top])
 			top = top - 1
 			pc = pc + 1 
+		elseif code[pc] == "lload" then
+			top = top + 1
+			self.stack[top] = self.stack[base - code[pc+1]]
+			pc = pc + 2
+		elseif code[pc] == "store" then
+			self.mem[code[pc+1]] = self.stack[top]
+			print(pt.pt(self.mem))
+			print(self.stack[top])
+			print(pt.pt(self.stack))
+			top = top -1
+			pc = pc + 2
 		else
 			error("RuntimeError: unsupported opcode: " .. code[pc])
 		end
@@ -568,11 +581,14 @@ end
 function PUG:runVM()
 	local top = 0
 
+	print("Running code for function: main")
 	top = self:runFunc(self.funcDefs["main"], top)
 	if top == nil or top ~= 1 then
 		error("RuntimeError:  stack top is not 1 on program exit: " .. top)
 	end
-	print("PUG program ran successfully. Return code is: " .. self.stack[1])
+	print("PUG program ran successfully. Return value to lua interpreter is: " .. self.stack[1])
+	print("Memory contents just before termination: ")
+	print(pt.pt(self.mem))
 	self.stack = {}
 	self.mem = {}
 	self.code = {}
