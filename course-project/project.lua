@@ -208,7 +208,7 @@ local prt = lpeg.V"prt"
 
 PUG = {
 	grammar = {}, ast = {}, funcDefs = {}, funcAddr = {}, globals = {}, nglobals = 0, locals = {}, blkNest = 0,
-        expOpcodes = { ["+"] = "add", ["-"] = "sub", ["/"] = "div", ["*"] = "mul", ["%"] = "mode",
+        expOpcodes = { ["+"] = "add", ["-"] = "sub", ["/"] = "div", ["*"] = "mul", ["%"] = "mode", ["^"] = "exp",
 	               ["<="] = "leq", ["<"] = "lt", [">="] = "geq", [">"] = "gt", ["=="] = "eq", ["!="] = "neq"},
 	stack = {}, mem = {}
       }
@@ -263,23 +263,23 @@ local grammar = lpeg.P{"prog",
 					* CP
 					* block
 					* KEYWORD("elseif") * (ifelseifstat + ifelsestat + ifstat) -- order
-					/ PUG:astNode("ifstat", "predExp", "ifblock", "elseifstat"),
+					/ PUG:astNode("ifstat", "predExp", "ifBlock", "elseifstat"),
 			ifelsestat = 
 			                OP 
 					* rvalue
 					* CP
 					* block
 					* elsestat
-					/ PUG:astNode("ifistat", "predExp", "ifblock", "elsestat"),
+					/ PUG:astNode("ifstat", "predExp", "ifBlock", "elsestat"),
 			ifstat = 
 			                OP 
 					* rvalue
 					* CP
 					* block
-					/ PUG:astNode("ifstat", "predExp", "ifblock"),
+					/ PUG:astNode("ifstat", "predExp", "ifBlock"),
 			elsestat = KEYWORD("else") 
 					* block
-					/ PUG:astNode("elsestat", "elseblock"),
+					/ PUG:astNode("elsestat", "elseBlock"),
                         stat = (lvalue * opAssign * rvalue
 					/ PUG:astNode("assign", "lvalue", "rvalue"))
 				+ KEYWORD("while") * OP
@@ -447,18 +447,67 @@ function PUG:codeGenLvalue(ast)
 
 end
 
+function PUG:codeGenGetPCHere()
+	return #self.code
+end
+
+
+function PUG:codeGenElseStat(ast)
+	if ast.tag ~= "elsestat" then
+		error("CodeGenError: missing elsestat ast tag in else statement: " .. ast.tag)
+	end
+	if not ast.elseBlock then
+		error("CodeGenError: missing elseBlock ast member in else statement")
+	end
+	self:codeGenBlock(ast.elseBlock)
+end
+
+function PUG:codeGenIfStat(ast)
+	if ast.tag ~= "ifstat" then
+		error("CodeGenError: missing ifstat ast tag in if statement: " .. ast.tag)
+	end
+	if not ast.predExp then
+		error("CodeGenError: missing predExp ast member in if statement")
+	end
+	self:codeGenExp(ast.predExp)
+	if not ast.ifBlock then
+		error("CodeGenError: missing ifBlock ast member in if statement")
+	end
+	self:codeInstr("jmpForIfZ")
+	self:codeImm(0) -- placeholder for fixup
+	local fromPC = self:codeGenGetPCHere()
+	self:codeGenBlock(ast.ifBlock)
+	self:codeInstr("jmpFor")
+	self:codeImm(0) -- placeholder for fixup2
+	local fromPC2 = self:codeGenGetPCHere()
+	local toPC = self:codeGenGetPCHere()
+	self.code[fromPC] = toPC - fromPC + 1
+	if not ast.elsestat and not ast.elseifstat then
+		;
+	elseif ast.elsestat and not ast.elseifstat then
+		self:codeGenElseStat(ast.elsestat)
+	elseif ast.elseifstat and not ast.elsestat then
+		self:codeGenIfStat(ast.elseifstat)
+	else
+		error("CodeGenError: malformed ifstat ast: " .. pt.pt(ast))
+	end
+	local toPC2 = self:codeGenGetPCHere()
+	print(fromPC2)
+	self.code[fromPC2] = toPC2 - fromPC2 + 1
+end
+
 function PUG:codeGenStat(ast)
 	if ast.tag == "assign" then
 		self:codeGenExp(ast.rvalue)
 		self:codeGenLvalue(ast.lvalue)
 	elseif ast.tag == "ifstat" then
-		self:codeGenIfstat(ast)
+		self:codeGenIfStat(ast)
 	elseif ast.tag == "elsestat" then
-		self:codeGenElsestat(ast)
+		self:codeGenElseStat(ast)
 	elseif ast.tag == "whilestat" then
-		self:codeGenWhilestat(ast)
+		self:codeGenWhileStat(ast)
 	elseif ast.tag == "dowhilestat" then
-		self:codeGenDoWhilestat(ast)
+		self:codeGenDoWhileStat(ast)
 	elseif ast.tag == "prt" then
 		self:codeGenExp(ast.rvalue)
 		self:codeInstr("prt")
@@ -595,6 +644,88 @@ function PUG:runFunc(funcDef, top)
 			top = top + 1
 			self.stack[top] = array
 			pc = pc + 2
+		elseif code[pc] == "add" then
+			self.stack[top-1] = self.stack[top - 1] + self.stack[top]
+			top = top - 1
+			pc = pc + 1
+		elseif code[pc] == "sub" then
+			self.stack[top-1] = self.stack[top - 1] - self.stack[top]
+			top = top - 1
+			pc = pc + 1
+		elseif code[pc] == "mul" then
+			self.stack[top-1] = self.stack[top - 1] * self.stack[top]
+			top = top - 1
+			pc = pc + 1
+		elseif code[pc] == "div" then
+			self.stack[top-1] = self.stack[top - 1] / self.stack[top]
+			top = top - 1
+			pc = pc + 1
+		elseif code[pc] == "mod" then
+			self.stack[top-1] = self.stack[top - 1] % self.stack[top]
+			top = top - 1
+			pc = pc + 1
+		elseif code[pc] == "exp" then
+			self.stack[top-1] = self.stack[top - 1] ^ self.stack[top]
+			top = top - 1
+			pc = pc + 1
+		elseif code[pc] == "geq" then
+			if self.stack[top - 1] >= self.stack[top] then 
+				self.stack[top-1] = 1
+			else
+				self.stack[top-1] = 0
+			end
+			top = top - 1
+			pc = pc + 1
+		elseif code[pc] == "gt" then
+			if self.stack[top - 1] > self.stack[top] then 
+				self.stack[top-1] = 1
+			else
+				self.stack[top-1] = 0
+			end
+			self.stack[top-1] = self.stack[top - 1] > self.stack[top]
+			top = top - 1
+			pc = pc + 1
+		elseif code[pc] == "leq" then
+			if self.stack[top - 1] <= self.stack[top] then 
+				self.stack[top-1] = 1
+			else
+				self.stack[top-1] = 0
+			end
+			top = top - 1
+			pc = pc + 1
+		elseif code[pc] == "lt" then
+			if self.stack[top - 1] < self.stack[top] then 
+				self.stack[top-1] = 1
+			else
+				self.stack[top-1] = 0
+			end
+			top = top - 1
+			pc = pc + 1
+		elseif code[pc] == "eq" then
+			if self.stack[top - 1] == self.stack[top] then 
+				self.stack[top-1] = 1
+			else
+				self.stack[top-1] = 0
+			end
+			top = top - 1
+			pc = pc + 1
+		elseif code[pc] == "neq" then
+			if self.stack[top - 1] ~= self.stack[top] then 
+				self.stack[top-1] = 1
+			else
+				self.stack[top-1] = 0
+			end
+			top = top - 1
+			pc = pc + 1
+		elseif code[pc] == "jmpForIfZ" then
+			if self.stack[top] == 0 then
+				pc = pc + code[pc+1] + 1
+			else
+				pc = pc + 2
+			end
+			top = top - 1
+		elseif code[pc] == "jmpFor" then
+			pc = pc + code[pc+1] + 1
 		else
 			error("RuntimeError: unsupported opcode: " .. code[pc])
 		end
@@ -610,7 +741,7 @@ function PUG:runVM()
 	if top == nil or top ~= 1 then
 		error("RuntimeError:  stack top is not 1 on program exit: " .. top)
 	end
-	print("PUG program ran successfully. Return value to lua interpreter is: " .. self.stack[1])
+	print("PUG program ran successfully. Return value to lua interpreter is: " .. tostring(self.stack[1]))
 	print("Memory contents after program termination ========> " .. pt.pt(self.mem))
 	self.stack = {}
 	self.mem = {}

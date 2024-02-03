@@ -4,8 +4,18 @@ function myfunc(a, b, c)
     v = z;
     return 500
 }
+function myfunc2(a, b)
+{
+    if (a != b ) {
+      @600
+    } elseif (a == b) {
+      @1500
+    } else {
+       @1200
+    }
+}
 function main()
 {
    @myfunc(1,2,3);
-   return 600
+   return myfunc2(4, 2)
 }
