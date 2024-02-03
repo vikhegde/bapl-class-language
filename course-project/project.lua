@@ -144,18 +144,22 @@ local function oneBinaryOp(lst)
 end
 
 local function foldIndex(lst)
-	local tree = { tag = "arrayIndex", indexTree = nil, index = lst[#lst]}
+	local index = lst[#lst]
+	local tree = { tag = "arrayIndex", indexTree = nil, index = index}
 	for i = (#lst)-1,2,-1 do
-		tree = { tag = "arrayIndex", indexTree = tree, index = lst[i]}
+		index = lst[i]
+		tree = { tag = "arrayIndex", indexTree = tree, index = index}
 	end
 	tree = { tag = "array", indexTree = tree, array = lst[1]}
 	return tree
 end
 
 local function foldNewIndex(lst)
-	local tree = { tag = "arrayIndex", indexTree = nil, index = lst[#lst]}
+	local index = lst[#lst]
+	local tree = { tag = "arrayIndex", indexTree = nil, index = index}
 	for i = (#lst)-1,1,-1 do
-		tree = { tag = "arrayIndex", indexTree = tree, index = lst[i]}
+		index = lst[i]
+		tree = { tag = "arrayIndex", indexTree = tree, index = index}
 	end
 	tree = { tag = "newarray", indexTree = tree}
 	return tree
@@ -286,14 +290,14 @@ local grammar = lpeg.P{"prog",
 					* rvalue
 					* CP
 					* block
-					/ PUG:astNode("whilestat", "predExp", "loop")
+					/ PUG:astNode("whilestat", "predExp", "whileBlock")
 				+ KEYWORD("do")
 					* block
 					* KEYWORD("while")
 					* OP
 					* rvalue
 					* CP
-					/ PUG:astNode("dowhilestat", "loop", "predExp")
+					/ PUG:astNode("dowhilestat", "whileBlock", "predExp")
 				+ KEYWORD("if") * (ifelseifstat + ifelsestat + ifstat)
 				+ (PRT * rvalue) / PUG:astNode("prt", "rvalue")
 				+ (KEYWORD("return") * (rvalue^0)) / PUG:astNode("returnstat", "rvalue")
@@ -332,10 +336,10 @@ end
 
 function PUG:codeImm(num)
 	if not num then
-		error("Codegen Error: imediate value is nil in imediate value code gen")
+		error("Codegen Error: immediate value is nil in immediate value code gen")
 	end
 	if type(num) == "table" then
-		error("Codegen Error: imediate value is a lua table in imediate value code gen")
+		error("Codegen Error: immediate value is a lua table in immediate value code gen")
 	end
 	local code = self.code
 	code[#code + 1] = num
@@ -353,6 +357,7 @@ function PUG:codeGenIndexTree(ast, dim)
 			dim = self:codeGenIndexTree(ast.indexTree, dim)
 		end
 	end
+	print(dim)
 	return dim
 end
 
@@ -422,6 +427,29 @@ function PUG:codeGenExp(ast)
 	elseif ast.tag == "numericLiteral" then
 		self:codeInstr("push")
 		self:codeImm(ast.value)
+	elseif ast.tag == "array" then
+		if not ast.array or not ast.indexTree then
+			error("codeGenError - malformed ast - missing array or indexTree element in rvalue array ast")
+		end
+		local dim = self:codeGenIndexTree(ast.indexTree, 0)
+		local resolved = false
+		for i = 1,#self.locals do
+			if self.locals[i] == ast.array then
+				self:codeInstr("larrayget")
+				self:codeImm(i)
+				resolved = true
+				break
+			end
+		end
+		if not resolved then
+			local gptr = self.globals[ast.array]
+			if not gptr then
+				error("codeGenError: malformed ast - failed to resolve array name in array rvalue: " .. ast.array)
+			end
+			self:codeInstr("arrayget")
+			self:codeImm(gptr)
+		end
+		self:codeImm(dim)
 	else 
 		error("CodeGen error - malformed ast - unrecognized ast tag: " .. ast.tag)
 	end
@@ -439,6 +467,30 @@ function PUG:codeGenLvalue(ast)
 		self.locals[#self.locals + 1] = ast.name
 		self:codeInstr("lstore")
 		self:codeImm(#self.locals)
+	elseif ast.tag == "array" then
+		if not ast.array or not ast.indexTree then
+			error("codeGenError - malformed ast - missing array or indexTree element in lvalue array ast")
+		end
+		local dim = self:codeGenIndexTree(ast.indexTree, 0)
+		local resolved = false
+		for i = 1,#self.locals do
+			if self.locals[i] == ast.array then
+				self:codeInstr("larrayset")
+				self:codeImm(i)
+				resolved = true
+				break
+			end
+		end
+		if not resolved then
+			local gptr = self.globals[ast.array]
+			if not gptr then
+				error("codeGenError: malformed ast - failed to resolve array name in array lvalue: " .. ast.array)
+			end
+			self:codeInstr("arrayset")
+			self:codeImm(gptr)
+		end
+		self:codeImm(dim)
+
 	else
 
 		error("Codegen error: maalformed ast - unrecognized Lvalue tag: " .. ast.tag)
@@ -451,6 +503,47 @@ function PUG:codeGenGetPCHere()
 	return #self.code
 end
 
+function PUG:codeGenWhileStat(ast)
+	if ast.tag ~= "whilestat" then
+		error("CodeGenError: missing whilestat ast tag in while statement: " .. ast.tag)
+	end
+	if not ast.predExp then
+		error("CodeGenError: missing predExp ast member in while statement")
+	end
+	if not ast.whileBlock then
+		error("CodeGenError: missing whileBlock ast member in while statement")
+	end
+	local toPC2 = self:codeGenGetPCHere()
+	self:codeGenExp(ast.predExp)
+	self:codeInstr("jmpIfZ")
+	self:codeImm(0) -- placeholder for fixup
+	local fromPC = self:codeGenGetPCHere()
+	self:codeGenBlock(ast.whileBlock)
+	self:codeInstr("jmp")
+	self:codeImm(0) -- placeholder for fixup2
+	local toPC = self:codeGenGetPCHere()
+	self.code[fromPC] = toPC + 1 - fromPC -- skip while block
+	local fromPC2 = toPC
+	self.code[fromPC2] = toPC2 + 1 - fromPC2
+end
+
+function PUG:codeGenDoWhileStat(ast)
+	if ast.tag ~= "dowhilestat" then
+		error("CodeGenError: missing dowhilestat ast tag in do-while statement: " .. ast.tag)
+	end
+	if not ast.predExp then
+		error("CodeGenError: missing predExp ast member in do-while statement")
+	end
+	if not ast.whileBlock then
+		error("CodeGenError: missing while-Block ast member in do-while statement")
+	end
+	local toPC = self:codeGenGetPCHere()
+	self:codeGenBlock(ast.whileBlock)
+	self:codeGenExp(ast.predExp)
+	self:codeInstr("jmpIfNZ")
+	local fromPC = self:codeGenGetPCHere()
+	self:codeImm(toPC + 1 - (fromPC + 1))
+end
 
 function PUG:codeGenElseStat(ast)
 	if ast.tag ~= "elsestat" then
@@ -473,15 +566,15 @@ function PUG:codeGenIfStat(ast)
 	if not ast.ifBlock then
 		error("CodeGenError: missing ifBlock ast member in if statement")
 	end
-	self:codeInstr("jmpForIfZ")
+	self:codeInstr("jmpIfZ")
 	self:codeImm(0) -- placeholder for fixup
 	local fromPC = self:codeGenGetPCHere()
 	self:codeGenBlock(ast.ifBlock)
-	self:codeInstr("jmpFor")
+	self:codeInstr("jmp")
 	self:codeImm(0) -- placeholder for fixup2
 	local fromPC2 = self:codeGenGetPCHere()
 	local toPC = self:codeGenGetPCHere()
-	self.code[fromPC] = toPC - fromPC + 1
+	self.code[fromPC] = toPC + 1 - fromPC
 	if not ast.elsestat and not ast.elseifstat then
 		;
 	elseif ast.elsestat and not ast.elseifstat then
@@ -492,8 +585,7 @@ function PUG:codeGenIfStat(ast)
 		error("CodeGenError: malformed ifstat ast: " .. pt.pt(ast))
 	end
 	local toPC2 = self:codeGenGetPCHere()
-	print(fromPC2)
-	self.code[fromPC2] = toPC2 - fromPC2 + 1
+	self.code[fromPC2] = toPC2 + 1 - fromPC2 
 end
 
 function PUG:codeGenStat(ast)
@@ -629,6 +721,10 @@ function PUG:runFunc(funcDef, top)
 			print("PUG stdout: =========> " .. self.stack[top])
 			top = top - 1
 			pc = pc + 1 
+		elseif code[pc] == "load" then
+			top = top + 1
+			self.stack[top] = self.mem[code[pc+1]]
+			pc = pc + 2
 		elseif code[pc] == "lload" then
 			top = top + 1
 			self.stack[top] = self.stack[base - code[pc+1] + 1]
@@ -682,7 +778,6 @@ function PUG:runFunc(funcDef, top)
 			else
 				self.stack[top-1] = 0
 			end
-			self.stack[top-1] = self.stack[top - 1] > self.stack[top]
 			top = top - 1
 			pc = pc + 1
 		elseif code[pc] == "leq" then
@@ -717,15 +812,79 @@ function PUG:runFunc(funcDef, top)
 			end
 			top = top - 1
 			pc = pc + 1
-		elseif code[pc] == "jmpForIfZ" then
+		elseif code[pc] == "jmpIfZ" then
 			if self.stack[top] == 0 then
 				pc = pc + code[pc+1] + 1
-			else
+			elseif self.stack[top] == 1 then
 				pc = pc + 2
+			else 
+				error("runTimeError: Invalid code generation - boolean value is neither 0 or 1: " .. self.stack[top])
 			end
 			top = top - 1
-		elseif code[pc] == "jmpFor" then
+		elseif code[pc] == "jmpIfNZ" then
+			if self.stack[top] == 1 then
+				pc = pc + code[pc+1] + 1
+			elseif self.stack[top] == 0 then
+				pc = pc + 2
+			else 
+				error("runTimeError: Invalid code generation - boolean value is neither 0 or 1: " .. self.stack[top])
+			end
+			top = top - 1
+		elseif code[pc] == "jmp" then
 			pc = pc + code[pc+1] + 1
+		elseif code[pc] == "arrayset" or code[pc] == "larrayset" then
+			local array = 1
+			if code[pc] == "arrayset" then
+				array = self.mem[code[pc+1]]
+			elseif code[pc] == "larrayset" then
+				array = self.stack[base - code[pc+1] + 1]
+			else
+				error("codeGenInternalError: array codeGen is neither arrayset nor larrayset: " .. code[pc])
+			end
+			local dim = code[pc+2]
+			local index = -1
+			for i = 1,dim-1 do
+				index = self.stack[top + 1 - i]
+				if index <= 0 then
+					error("runTimeError: array index is less than 1: " .. tostring(index))
+				end
+				array = array[index]
+			end
+			index = self.stack[top + 1 - dim]
+			if index <= 0 then
+				error("runTimeError: array index is less than 1: " .. tostring(index))
+			end
+			array[index] = self.stack[top - dim]
+			top = top - dim - 1 -- 'dim' indices and rvalue on stack to be set
+			pc = pc + 3 -- opcode + dim + arraybase
+		elseif code[pc] == "arrayget" or code[pc] == "larrayget" then
+			local array = 1
+			if code[pc] == "arrayget" then
+				array = self.mem[code[pc+1]]
+			elseif code[pc] == "larrayget" then
+				array = self.stack[base - code[pc+1] + 1]
+			else
+				error("codeGenInternalError: array codeGen is neither arrayget nor larrayget: " .. code[pc])
+			end
+			local dim = code[pc+2]
+			local index = -1
+			for i = 1,dim-1 do
+				index = self.stack[top + 1 - i]
+				if index <= 0 then
+					error("runTimeError: array index is less than 1: " .. tostring(index))
+				end
+				array = array[index]
+			end
+			index = self.stack[top + 1 - dim]
+			if index <= 0 then
+				error("runTimeError: array index is less than 1: " .. tostring(index))
+			end
+			local rvalue = array[index]
+			top = top - dim -- 'dim' indices
+			top = top + 1
+			self.stack[top] = rvalue
+			pc = pc + 3 -- opcode + dim + arraybase
+
 		else
 			error("RuntimeError: unsupported opcode: " .. code[pc])
 		end
