@@ -339,7 +339,7 @@ local grammar = lpeg.P{"prog",
 			elsestat = KEYWORD("else") 
 					* block
 					/ PUG:astNode("elsestat", "elseBlock"),
-                        stat = ((lvalue * opAssign * rvalue
+                        stat = (((lvalue * opAssign * rvalue
 					/ PUG:astNode("assign", "lvalue", "rvalue"))
 				+ KEYWORD("while") * OP
 					* rvalue
@@ -357,9 +357,9 @@ local grammar = lpeg.P{"prog",
 				+ (PRT * rvalue) / PUG:astNode("prt", "rvalue")
 				+ (KEYWORD("return") * (rvalue^0)) / PUG:astNode("returnstat", "rvalue")
 			        + rvalue   -- lvalue cannot occur by itself but rvalue can
-				)^0  -- empty statements are valid
-				* (terminator^1),   -- multiple terminators ;;;; are legal
-			stats = lpeg.Ct(stat * (stat ^ 0)),
+				)  -- empty statements are valid
+				* (terminator^1)) + (terminator^1),   -- multiple terminators ;;;; are legal
+			stats = lpeg.Ct(stat ^ 0),
                         -- ; after block is legal
                         -- empty block is legal
 			block = OB * stats^-1 * CB * (terminator^0) / PUG:astNode("block", "stats"),
