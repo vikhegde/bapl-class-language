@@ -1,11 +1,23 @@
 local lpeg = require"lpeg"
 local pt = require"pt"
 
+--
+local MAXSYNTAXCONTEXT = 20
+local MAXSYNTAXLINECONTEXT = 4
+
 -- Pattern for filler text like space and comments - has no capture 
+local maxPos = -1
+local maxLine = 0
 local space = lpeg.S" \n\t"
 local blockcmnt = lpeg.P("#{") * ((lpeg.P(1) - lpeg.P("#}"))^0) * lpeg.P("#}") 
 local linecmnt = lpeg.P("#") * ((lpeg.P(1) - lpeg.P("\n"))^0) * lpeg.P("\n") 
-local whitespace = (blockcmnt + linecmnt + space) ^ 0  -- order is important lpeg is possesive 
+local whitespace = ((blockcmnt + linecmnt + space) * lpeg.P(function(s, p)
+								maxPos = p
+								if string.sub(s,p-1,p-1) == "\n" then
+									maxLine = maxLine + 1
+								end
+								return true
+							    end)) ^ 0  -- order is important lpeg is possesive 
 
 -- Numbers - integers and floating point
 
@@ -48,8 +60,8 @@ local opAssign = lpeg.P("=") * whitespace
 local alphaNumUnderscore = lpeg.R("az", "AZ", "09", "__")
 local alphaUnderscore = lpeg.R("az", "AZ", "__")
 
--- Pattern for separator. Separator is semi-colon - it is a separator as in Pascal and not a terminator as in C
-local separator = lpeg.P(";") * whitespace
+-- Pattern for terminator. terminator is semi-colon - it is a a terminator as in C and not separator as in Pascal
+local terminator = lpeg.P(";") * whitespace
 
 -- Patterns for block
 local OB = lpeg.P("{") * whitespace
@@ -69,6 +81,49 @@ local CS = lpeg.P("]") * whitespace
 
 -- Pattern for print
 local PRT = lpeg.P("@") * whitespace
+
+local function syntaxError(inputText, lineNum, errorPos)
+	print("\nsyntaxError: Compile failed at line: " .. tostring(lineNum) .. "\n")
+	local contextPrefixPos = -1
+	local contextSuffixPos = -1
+	local count = 0
+	if errorPos - MAXSYNTAXCONTEXT < 1 then
+		contextSuffixPos = i
+	else
+		for i = errorPos-1,errorPos-40,-1 do
+			if string.sub(inputText, i, i) == "\n" then
+				count = count + 1
+				contextPrefixPos = i + 1
+				if count == MAXSYNTAXLINECONTEXT then
+					break	
+				end	
+			end
+		end
+	end
+
+	if count < MAXSYNTAXLINECONTEXT then
+		contextPrefixPos = 1 
+	end
+	count = 0
+	if errorPos + 40 > #inputText then
+		contextSuffixPos = i
+	else
+		for i = errorPos, errorPos + MAXSYNTAXCONTEXT do
+			if string.sub(inputText, i, i) == "\n" then
+				count = count + 1
+				contextSuffixPos = i
+				if count == MAXSYNTAXLINECONTEXT then
+					break
+				end
+			end
+		end
+	end
+	if count < MAXSYNTAXLINECONTEXT then
+		contextSuffixPos = #inputText 
+	end
+	print(string.sub(inputText, contextPrefixPos, errorPos-1) .. " [<== ERROR ==>] " .. string.sub(inputText, errorPos, contextSuffixPos))
+	print("Compile failed")
+end
 
 -- List of keywords
 local keywords = { "and", "or", "if", "elseif", "else", "while", "do", "function", "local", "new", "return"}
@@ -284,7 +339,7 @@ local grammar = lpeg.P{"prog",
 			elsestat = KEYWORD("else") 
 					* block
 					/ PUG:astNode("elsestat", "elseBlock"),
-                        stat = (lvalue * opAssign * rvalue
+                        stat = ((lvalue * opAssign * rvalue
 					/ PUG:astNode("assign", "lvalue", "rvalue"))
 				+ KEYWORD("while") * OP
 					* rvalue
@@ -301,11 +356,13 @@ local grammar = lpeg.P{"prog",
 				+ KEYWORD("if") * (ifelseifstat + ifelsestat + ifstat)
 				+ (PRT * rvalue) / PUG:astNode("prt", "rvalue")
 				+ (KEYWORD("return") * (rvalue^0)) / PUG:astNode("returnstat", "rvalue")
-			        + rvalue, -- lvalue cannot occur by itself but rvalue can
-			stats = lpeg.Ct(stat * ((separator^1) * stat) ^ 0),  -- multiple separators ;;;; are legal
+			        + rvalue   -- lvalue cannot occur by itself but rvalue can
+				)^0  -- empty statements are valid
+				* (terminator^1),   -- multiple terminators ;;;; are legal
+			stats = lpeg.Ct(stat * (stat ^ 0)),
                         -- ; after block is legal
                         -- empty block is legal
-			block = OB * stats^-1 * CB * (separator^0) / PUG:astNode("block", "stats"),
+			block = OB * stats^-1 * CB * (terminator^0) / PUG:astNode("block", "stats"),
 			funcDef = (KEYWORD("function")
 					* ID 
 					* OP * lpeg.Ct((ID * (comma * ID)^0)^0) * CP
@@ -315,11 +372,12 @@ local grammar = lpeg.P{"prog",
 
 PUG.grammar = grammar * -1
 
-function PUG:parse(text)
-	self.ast = self.grammar:match(text)
+function PUG:parse(inputText)
+	self.ast = self.grammar:match(inputText)
 	-- tricky - cannot use 'not' here since ast may be a boolean value
 	if self.ast == nil then
-		print("SyntaxError: Failed to parse pug program")
+		syntaxError(inputText, maxLine, maxPos)
+		os.exit()
 	end
 end
 
@@ -357,7 +415,6 @@ function PUG:codeGenIndexTree(ast, dim)
 			dim = self:codeGenIndexTree(ast.indexTree, dim)
 		end
 	end
-	print(dim)
 	return dim
 end
 
