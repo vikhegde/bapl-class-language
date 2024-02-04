@@ -7,30 +7,33 @@ function myfunc3(a, b, c)
 function myfunc3(a,b, c);
 function myfunc(a, b, c)
 {
-    local z = new [a][b][c];
-    z[1][2][1] = 5;
-    return z[1][2][1];
+    local z = (new [(a)][(b)][(c)]);
+    z[(1)][(2)][(1)] = (5);
+    y = (100);
+    x = 1500;
+    (x);
+    return (y)+(z[(1)][(2)][(1)]);
 }
 function myfunc2(a, b)
 {
-	i = 10;
+	i = (10);
 	do {
 		@i;
-		i = i - 1;
-	} while (i >= 10);
-	return 600;
+		i = ((i) - (1));
+	} while (((i) >= (10)));
+	return ((600));
 }
 function factorial(n, last = 2)
 {
-	if (n == 0) {
-		return last;
+	if (((n) == (0))) {
+		return (last);
 	} else {
-		return n * factorial(n-1, last);
+		return (n) * (factorial((n-1), (last)));
 	};
 }
 function main()
 {
-   @myfunc(1,2,3);
-   @myfunc2(4, 2);
-   return factorial(6);
+   @(myfunc((1),(2),(3)));
+   @((myfunc2((4), 2)));
+   return (factorial(6));
 }

@@ -288,11 +288,13 @@ local grammar = lpeg.P{"prog",
 			prog = whitespace
 				* lpeg.Ct(funcDef ^ 1) / PUG:astNode("program", "funcDefList")
 				* whitespace,
-			base = array 
+			base = OP * rvalue * CP
+			        + array 
 				+ funcCall 
 				+ (ID / PUG:astNode("var", "name"))
 				+ (number / PUG:astNode("numericLiteral", "value")),
-			exponent = array 
+			exponent = OP * rvalue * CP
+			        + array 
 				+ funcCall
 				+ (ID / PUG:astNode("var", "name")) 
 				+ (integer / PUG:astNode("numericLiteral", "value")),
@@ -309,6 +311,7 @@ local grammar = lpeg.P{"prog",
 			rvalue = newarray
 				 + (lpeg.Ct((relExp * ((opLogical * relExp)^0)))
 					/ foldBin),
+			-- a parenthesized lvalue is not legal
 			lvalue = ((KEYWORD("local") * array) / PUG:astNode("lvar", "array")) 
 					+ ((KEYWORD("local") * ID) / PUG:astNode("lvar", "name"))
 					+ array
@@ -327,7 +330,7 @@ local grammar = lpeg.P{"prog",
 			           + (KEYWORD("else") 
 					* block
 					/ PUG:astNode("elsestat", "elseBlock")),
-                        stat = (((lvalue * opAssign * rvalue
+                        stat = ((lvalue * opAssign * rvalue
 					/ PUG:astNode("assign", "lvalue", "rvalue"))
 				+ KEYWORD("while") * OP
 					* rvalue
@@ -346,7 +349,7 @@ local grammar = lpeg.P{"prog",
 				+ (KEYWORD("return") * (rvalue^0)) / PUG:astNode("returnstat", "rvalue")
 			        + rvalue   -- lvalue cannot occur by itself but rvalue can
 				)  -- empty statements are valid
-				* (terminator^1)) + (terminator^1),   -- multiple terminators ;;;; are legal
+				* (terminator^1) + (terminator^1),   -- multiple terminators ;;;; are legal
 			stats = lpeg.Ct(stat ^ 0),
                         -- ; after function-body-block is not legal. ; after if-block is legal
                         -- empty block is legal
@@ -651,6 +654,25 @@ function PUG:codeGenIfElseStat(ast)
 	self.code[fromPC2] = toPC2 + 1 - fromPC2 
 end
 
+
+function PUG:codeGenRvalue(ast)
+	if ast.tag ~= "rvalue" then
+		error("codeGenError rvalue ast tag not found in rvalue code statement: " .. ast.tag)
+	end
+	self:codeGenExp(ast)
+	self:codeInstr("pop")
+	self:codeImm(1)
+end
+
+function PUG:codeGenVar(ast)
+	if ast.tag ~= "var" then
+		error("codeGenError var ast tag not found in var code statement: " .. ast.tag)
+	end
+	self:codeGenExp(ast)
+	self:codeInstr("pop")
+	self:codeImm(1)
+end
+
 function PUG:codeGenStat(ast)
 	if ast.tag == "assign" then
 		self:codeGenExp(ast.rvalue)
@@ -673,7 +695,9 @@ function PUG:codeGenStat(ast)
 		self:codeInstr("ret")
 		self:codeImm(#self.params + #self.locals) -- pop argument to ret - number of funcparams and locals
 	elseif ast.tag == "rvalue" then
-		print("Skipping code generation for unassigned rvalue")
+		self:codeGenRvalue(ast)
+	elseif ast.tag == "var" then
+		self:codeGenVar(ast)
 	else
 		error("codeGenError: malformed ast - unrecognized statement tag: " .. ast.tag)
 	end
@@ -716,7 +740,7 @@ function PUG:codeGenFuncDef(ast)
 				error("codeGenError: mismatch between previous function prototype of function and function definition: " .. funcName)
 			end
 			if not ast.body then
-				print("Detected multiple compatible function proototypes for function: :" .. funcName .. " Ignoring...")
+				print("Detected multiple compatible function proototypes for function: " .. funcName .. " Ignoring...")
 				return
 			end
 			self:codeGenFuncDefBody(ast)
@@ -724,13 +748,13 @@ function PUG:codeGenFuncDef(ast)
 		elseif ast.body then
 			error("codeGenError: multiple definition of function definition: " .. funcName)
 		else
-			print("Detected compatible function proototype for function: :" .. funcName .. " after function definition.")
+			print("Detected compatible function proototype for function: " .. funcName .. " after function definition.")
 			print("Verifying number of parameters...")
 			if #funcDef.params ~= #ast.paramsList or (funcDef.defaultAst == nil and ast.defaultVal)
 				or (funcDef.defaultAst and ast.defaultVal == nil) then
 				error("codeGenError: mismatch between previous function defintion of function and function prototype: " .. funcName)
 			end
-			print("Ignoring redundant function prototype for function: :" .. funcName .. " after function definition.")
+			print("Ignoring redundant function prototype for function: " .. funcName .. " after function definition.")
 			return
 		end
 	end
@@ -806,9 +830,12 @@ function PUG:runFunc(funcDef, top)
 			self.stack[top] = retval
 			pc = pc + 2
 			return top
-		elseif code[pc] == "push" then
+		elseif code[pc] == "push" then -- argument to push is value to push on stack
 			top = top + 1
 			self.stack[top] = code[pc+1]
+			pc = pc + 2
+		elseif code[pc] == "pop" then -- argument to pop is number of values to pop
+			top = top - code[pc+1]
 			pc = pc + 2
 		elseif code[pc] == "call" then
 			local funcName = self.funcAddr[code[pc+1]]
