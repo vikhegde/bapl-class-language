@@ -1,10 +1,13 @@
 
 # test function
+function myfunc3(a, b, c);
+function myfunc3(a, b, c);
 function myfunc3(a, b, c)
 {;}
+function myfunc3(a,b, c);
 function myfunc(a, b, c)
 {
-    local z = new [a][b][c]
+    local z = new [a][b][c];
     z[1][2][1] = 5;
     return z[1][2][1];
 }
@@ -17,8 +20,17 @@ function myfunc2(a, b)
 	} while (i >= 10);
 	return 600;
 }
+function factorial(n, last = 2)
+{
+	if (n == 0) {
+		return last;
+	} else {
+		return n * factorial(n-1, last);
+	};
+}
 function main()
 {
    @myfunc(1,2,3);
-   return myfunc2(4, 2);
+   @myfunc2(4, 2);
+   return factorial(6);
 }

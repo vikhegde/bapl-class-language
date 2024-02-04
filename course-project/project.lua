@@ -75,6 +75,9 @@ local CP = lpeg.P(")") * whitespace
 -- Pattern for comma (funcDef and funcCall and expressions)
 local comma = lpeg.P(",") * whitespace
 
+-- equals is used for default value for last function parameter
+local equals = opAssign
+
 -- Patterns for square brackets
 local OS = lpeg.P("[") * whitespace
 local CS = lpeg.P("]") * whitespace
@@ -121,7 +124,7 @@ local function syntaxError(inputText, lineNum, errorPos)
 	if count < MAXSYNTAXLINECONTEXT then
 		contextSuffixPos = #inputText 
 	end
-	print(string.sub(inputText, contextPrefixPos, errorPos-1) .. " [<== ERROR ==>] " .. string.sub(inputText, errorPos, contextSuffixPos))
+	print(string.sub(inputText, contextPrefixPos, errorPos-1) .. " [<== parse failed HERE ==>] " .. string.sub(inputText, errorPos, contextSuffixPos))
 	print("Compile failed")
 end
 
@@ -253,9 +256,8 @@ local lvalue = lpeg.V"lvalue"
 local stat = lpeg.V"stat"
 local stats = lpeg.V"stats"
 local block = lpeg.V"block"
-local ifelseifstat = lpeg.V"ifelseifstat"
-local ifelsestat = lpeg.V"ifelsestat"
 local ifstat = lpeg.V"ifstat"
+local elseifstat = lpeg.V"elseifstat"
 local elsestat = lpeg.V"elsestat"
 local funcDef = lpeg.V"funcDef"
 local funcCall = lpeg.V"funcCall"
@@ -316,29 +318,15 @@ local grammar = lpeg.P{"prog",
 			array = lpeg.Ct(ID * ((OS * rvalue * CS) ^ 1)) / foldIndex,
 			newarray = KEYWORD("new") * lpeg.Ct((OS * rvalue * CS) ^ 1) / foldNewIndex,
                         -- lvalue and rvalue all by themselves are valid statements
-			ifelseifstat = 
-			                OP 
-					* rvalue
-					* CP
-					* block
-					* KEYWORD("elseif") * (ifelseifstat + ifelsestat + ifstat) -- order
-					/ PUG:astNode("ifstat", "predExp", "ifBlock", "elseifstat"),
-			ifelsestat = 
-			                OP 
-					* rvalue
-					* CP
-					* block
-					* elsestat
-					/ PUG:astNode("ifstat", "predExp", "ifBlock", "elsestat"),
-			ifstat = 
-			                OP 
+			ifstat =        OP 
 					* rvalue
 					* CP
 					* block
 					/ PUG:astNode("ifstat", "predExp", "ifBlock"),
-			elsestat = KEYWORD("else") 
+			elsestat = (KEYWORD("elseif") * ifstat * (elsestat^-1) / PUG:astNode("ifelsestat", "ifstat", "nestedelseifstat"))
+			           + (KEYWORD("else") 
 					* block
-					/ PUG:astNode("elsestat", "elseBlock"),
+					/ PUG:astNode("elsestat", "elseBlock")),
                         stat = (((lvalue * opAssign * rvalue
 					/ PUG:astNode("assign", "lvalue", "rvalue"))
 				+ KEYWORD("while") * OP
@@ -353,21 +341,41 @@ local grammar = lpeg.P{"prog",
 					* rvalue
 					* CP
 					/ PUG:astNode("dowhilestat", "whileBlock", "predExp")
-				+ KEYWORD("if") * (ifelseifstat + ifelsestat + ifstat)
+				+ KEYWORD("if") * ifstat * (elsestat^-1)  / PUG:astNode("ifelsestat", "ifstat", "nestedelseifstat")
 				+ (PRT * rvalue) / PUG:astNode("prt", "rvalue")
 				+ (KEYWORD("return") * (rvalue^0)) / PUG:astNode("returnstat", "rvalue")
 			        + rvalue   -- lvalue cannot occur by itself but rvalue can
 				)  -- empty statements are valid
 				* (terminator^1)) + (terminator^1),   -- multiple terminators ;;;; are legal
 			stats = lpeg.Ct(stat ^ 0),
-                        -- ; after block is legal
+                        -- ; after function-body-block is not legal. ; after if-block is legal
                         -- empty block is legal
-			block = OB * stats^-1 * CB * (terminator^0) / PUG:astNode("block", "stats"),
+			block = OB * stats^-1 * CB / PUG:astNode("block", "stats"),
 			funcDef = (KEYWORD("function")
+					* ID 
+					* OP * lpeg.Ct((ID * (comma * ID)^0)^0) 
+					* (equals * rvalue)
+					* CP
+					* block
+					) / PUG:astNode("funcDef", "funcName", "paramsList", "defaultVal", "body")
+				   + ((KEYWORD("function")
+					* ID 
+					* OP * lpeg.Ct((ID * (comma * ID)^0)^0) 
+					* (equals * rvalue)
+					* CP
+					* terminator 
+					)/ PUG:astNode("funcDef", "funcName", "paramsList", "defaultVal"))
+				   + ((KEYWORD("function")
 					* ID 
 					* OP * lpeg.Ct((ID * (comma * ID)^0)^0) * CP
 					* block
-					) / PUG:astNode("funcDef", "funcName", "paramsList", "body")
+					) / PUG:astNode("funcDef", "funcName", "paramsList", "body"))
+				   +  ((KEYWORD("function")
+					* ID 
+					* OP * lpeg.Ct((ID * (comma * ID)^0)^0) * CP
+					* terminator
+					) / PUG:astNode("funcDef", "funcName", "paramsList"))
+
 		}
 
 PUG.grammar = grammar * -1
@@ -383,10 +391,10 @@ end
 
 function PUG:codeInstr(opcode)
 	if not opcode then
-		error("Codegen Error: opcode is nil in instruction code gen")
+		error("codeGenError: opcode is nil in instruction code gen")
 	end
 	if type(opcode) == "table" then
-		error("Codegen Error: opcode is a lua `table in instruction code gen")
+		error("codeGenError: opcode is a lua `table in instruction code gen")
 	end
 	local code = self.code
 	code[#code + 1] = opcode
@@ -394,10 +402,10 @@ end
 
 function PUG:codeImm(num)
 	if not num then
-		error("Codegen Error: immediate value is nil in immediate value code gen")
+		error("codeGenError: immediate value is nil in immediate value code gen")
 	end
 	if type(num) == "table" then
-		error("Codegen Error: immediate value is a lua table in immediate value code gen")
+		error("codeGenError: immediate value is a lua table in immediate value code gen")
 	end
 	local code = self.code
 	code[#code + 1] = num
@@ -405,9 +413,9 @@ end
 
 function PUG:codeGenIndexTree(ast, dim)
 	if ast.tag ~= "arrayIndex" then
-		error("CodeGen error - malformed ast - indextree ast has no arrayIndex tag: " .. ast.tag)
+		error("codeGenError - malformed ast - indextree ast has no arrayIndex tag: " .. ast.tag)
 	elseif not ast.index then
-		error("CodeGen error - malformed ast - indextree ast has no index member")
+		error("codeGenError - malformed ast - indextree ast has no index member")
 	else
 		self:codeGenExp(ast.index)
 		dim = dim + 1
@@ -420,15 +428,19 @@ end
 
 function PUG:codeGenFuncCall(ast)
 	if ast.tag ~= "funcCall" then
-		error("CodeGen error - malformed ast - function call ast has no funcCall tag: " .. ast.tag)
+		error("codeGenError - malformed ast - function call ast has no funcCall tag: " .. ast.tag)
 	end
 	local funcDef = self.funcDefs[ast.funcName]
 	if not funcDef then
-		error("CodeGen error - function call to undefined function: " .. ast.funcName)
-	elseif #funcDef.params ~= #ast.argsList then
-		error("CodeGen error - function " .. ast.funcName .."() #args " .. #ast.argsList .. " != #params " .. #funcDef.params) 
+		error("codeGenError - function call to undefined function: " .. ast.funcName)
+	elseif (#funcDef.params ~= #ast.argsList) and (not funcDef.defaultAst or #ast.argsList ~= #funcDef.params - 1) then
+		error("codeGenError - function " .. ast.funcName .."() #args " .. #ast.argsList .. " != #params " .. #funcDef.params) 
 	end
 
+	if #ast.argsList == #funcDef.params - 1 then
+		assert(funcDef.defaultAst)
+		self:codeGenExp(funcDef.defaultAst) -- generate final argument with default value in stack (if needed)
+	end
 	for i = #ast.argsList,1,-1 do
 		self:codeGenExp(ast.argsList[i]) -- Generate arguments on stack in reverse order
 	end
@@ -465,7 +477,7 @@ function PUG:codeGenExp(ast)
 		end
 		if not resolved then
 			if not self.globals[ast.name] then
-				error("Codegen error: undefined global: " .. ast.name)
+				error("codeGenError: undefined global: " .. ast.name)
 			end
 			self:codeInstr("load")
 			self:codeImm(self.globals[ast.name])
@@ -508,7 +520,7 @@ function PUG:codeGenExp(ast)
 		end
 		self:codeImm(dim)
 	else 
-		error("CodeGen error - malformed ast - unrecognized ast tag: " .. ast.tag)
+		error("codeGenError - malformed ast - unrecognized ast tag: " .. ast.tag)
 	end
 end
 
@@ -550,7 +562,7 @@ function PUG:codeGenLvalue(ast)
 
 	else
 
-		error("Codegen error: maalformed ast - unrecognized Lvalue tag: " .. ast.tag)
+		error("codeGenError: maalformed ast - unrecognized Lvalue tag: " .. ast.tag)
 	end
 
 
@@ -562,13 +574,13 @@ end
 
 function PUG:codeGenWhileStat(ast)
 	if ast.tag ~= "whilestat" then
-		error("CodeGenError: missing whilestat ast tag in while statement: " .. ast.tag)
+		error("codeGenError: missing whilestat ast tag in while statement: " .. ast.tag)
 	end
 	if not ast.predExp then
-		error("CodeGenError: missing predExp ast member in while statement")
+		error("codeGenError: missing predExp ast member in while statement")
 	end
 	if not ast.whileBlock then
-		error("CodeGenError: missing whileBlock ast member in while statement")
+		error("codeGenError: missing whileBlock ast member in while statement")
 	end
 	local toPC2 = self:codeGenGetPCHere()
 	self:codeGenExp(ast.predExp)
@@ -586,13 +598,13 @@ end
 
 function PUG:codeGenDoWhileStat(ast)
 	if ast.tag ~= "dowhilestat" then
-		error("CodeGenError: missing dowhilestat ast tag in do-while statement: " .. ast.tag)
+		error("codeGenError: missing dowhilestat ast tag in do-while statement: " .. ast.tag)
 	end
 	if not ast.predExp then
-		error("CodeGenError: missing predExp ast member in do-while statement")
+		error("codeGenError: missing predExp ast member in do-while statement")
 	end
 	if not ast.whileBlock then
-		error("CodeGenError: missing while-Block ast member in do-while statement")
+		error("codeGenError: missing while-Block ast member in do-while statement")
 	end
 	local toPC = self:codeGenGetPCHere()
 	self:codeGenBlock(ast.whileBlock)
@@ -604,42 +616,36 @@ end
 
 function PUG:codeGenElseStat(ast)
 	if ast.tag ~= "elsestat" then
-		error("CodeGenError: missing elsestat ast tag in else statement: " .. ast.tag)
+		error("codeGenError: missing elsestat ast tag in else statement: " .. ast.tag)
 	end
 	if not ast.elseBlock then
-		error("CodeGenError: missing elseBlock ast member in else statement")
+		error("codeGenError: missing elseBlock ast member in else statement")
 	end
 	self:codeGenBlock(ast.elseBlock)
 end
 
-function PUG:codeGenIfStat(ast)
-	if ast.tag ~= "ifstat" then
-		error("CodeGenError: missing ifstat ast tag in if statement: " .. ast.tag)
+function PUG:codeGenIfElseStat(ast)
+	if ast.tag ~= "ifelsestat" then
+		error("codeGenError: missing ifelsestat ast tag in if statement: " .. ast.tag)
 	end
-	if not ast.predExp then
-		error("CodeGenError: missing predExp ast member in if statement")
+	if not ast.ifstat or not ast.ifstat.predExp then
+		error("codeGenError: missing ifstat or ifstat.predExp ast member in if statement")
 	end
-	self:codeGenExp(ast.predExp)
-	if not ast.ifBlock then
-		error("CodeGenError: missing ifBlock ast member in if statement")
+	self:codeGenExp(ast.ifstat.predExp)
+	if not ast.ifstat.ifBlock then
+		error("codeGenError: missing ifBlock ast member in if statement")
 	end
 	self:codeInstr("jmpIfZ")
 	self:codeImm(0) -- placeholder for fixup
 	local fromPC = self:codeGenGetPCHere()
-	self:codeGenBlock(ast.ifBlock)
+	self:codeGenBlock(ast.ifstat.ifBlock)
 	self:codeInstr("jmp")
 	self:codeImm(0) -- placeholder for fixup2
 	local fromPC2 = self:codeGenGetPCHere()
 	local toPC = self:codeGenGetPCHere()
 	self.code[fromPC] = toPC + 1 - fromPC
-	if not ast.elsestat and not ast.elseifstat then
-		;
-	elseif ast.elsestat and not ast.elseifstat then
-		self:codeGenElseStat(ast.elsestat)
-	elseif ast.elseifstat and not ast.elsestat then
-		self:codeGenIfStat(ast.elseifstat)
-	else
-		error("CodeGenError: malformed ifstat ast: " .. pt.pt(ast))
+	if ast.nestedelseifstat then
+		self:codeGenStat(ast.nestedelseifstat)
 	end
 	local toPC2 = self:codeGenGetPCHere()
 	self.code[fromPC2] = toPC2 + 1 - fromPC2 
@@ -649,8 +655,8 @@ function PUG:codeGenStat(ast)
 	if ast.tag == "assign" then
 		self:codeGenExp(ast.rvalue)
 		self:codeGenLvalue(ast.lvalue)
-	elseif ast.tag == "ifstat" then
-		self:codeGenIfStat(ast)
+	elseif ast.tag == "ifelsestat" then
+		self:codeGenIfElseStat(ast)
 	elseif ast.tag == "elsestat" then
 		self:codeGenElseStat(ast)
 	elseif ast.tag == "whilestat" then
@@ -669,14 +675,14 @@ function PUG:codeGenStat(ast)
 	elseif ast.tag == "rvalue" then
 		print("Skipping code generation for unassigned rvalue")
 	else
-		error("Codegen error: maalformed ast - unrecognized statement tag: " .. ast.tag)
+		error("codeGenError: malformed ast - unrecognized statement tag: " .. ast.tag)
 	end
 	
 end
 
 function PUG:codeGenBlock(ast)
 	if ast.tag ~= "block" then
-		error("CodeGen error: ast is malformed - no block ast tag at block level")
+		error("codeGenError: ast is malformed - no block ast tag at block level")
 	end
 	if not ast.stats then
 		return -- empty function body
@@ -686,29 +692,7 @@ function PUG:codeGenBlock(ast)
 	end
 end
 
-function PUG:codeGenFuncDef(ast)
-	if ast.tag ~= "funcDef" then
-		error("CodeGen error: ast is malformed - no funcDef ast tag at function level")
-	end
-	local funcName = ast.funcName
-	self.funcDefs[funcName] = {}
-	local funcDef = self.funcDefs[funcName]
-	self.funcAddr[#self.funcAddr + 1] = funcName
-	print("Generating code for function " ..funcName .. "()")
-	funcDef.params = ast.paramsList
-	funcDef.code = {}
-	funcDef.locals = {}
-	funcDef.funcAddr = #self.funcAddr
-	-- main cannot take any params
-	if funcName == "main" and #funcDef.params ~= 0 then
-		error("CodeGenError: main() cannot take any parameters")
-	end
-	self.params = funcDef.params
-	self.code = funcDef.code 
-	self.locals = funcDef.locals
-	if not ast.body then
-		error("CodeGen error: ast is malformed - no body ast tag in function: " .. funcName)
-	end
+function PUG:codeGenFuncDefBody(ast)
 	self:codeGenBlock(ast.body)
 	-- code to return a return value for a function in the event it does not have an explicit return
 	self:codeInstr("push")
@@ -717,14 +701,85 @@ function PUG:codeGenFuncDef(ast)
 	self:codeImm(#self.params + #self.locals) -- pop argument to ret - number of funcparams and locals
 	print(pt.pt(PUG.code))
 end
+
+function PUG:codeGenFuncDef(ast)
+	if ast.tag ~= "funcDef" then
+		error("codeGenError: ast is malformed - no funcDef ast tag at function level")
+	end
+	local funcName = ast.funcName
+	local funcDef = self.funcDefs[funcName]
+	if funcDef then
+		if funcDef.isProto then
+			print("Detected function defintion for function prototype. Verifying number of parameters match...")
+			if #funcDef.params ~= #ast.paramsList or (funcDef.defaultAst == nil and ast.defaultVal)
+				or (funcDef.defaultAst and ast.defaultVal == nil) then
+				error("codeGenError: mismatch between previous function prototype of function and function definition: " .. funcName)
+			end
+			if not ast.body then
+				print("Detected multiple compatible function proototypes for function: :" .. funcName .. " Ignoring...")
+				return
+			end
+			self:codeGenFuncDefBody(ast)
+			return
+		elseif ast.body then
+			error("codeGenError: multiple definition of function definition: " .. funcName)
+		else
+			print("Detected compatible function proototype for function: :" .. funcName .. " after function definition.")
+			print("Verifying number of parameters...")
+			if #funcDef.params ~= #ast.paramsList or (funcDef.defaultAst == nil and ast.defaultVal)
+				or (funcDef.defaultAst and ast.defaultVal == nil) then
+				error("codeGenError: mismatch between previous function defintion of function and function prototype: " .. funcName)
+			end
+			print("Ignoring redundant function prototype for function: :" .. funcName .. " after function definition.")
+			return
+		end
+	end
+			
+	self.funcDefs[funcName] = {}
+	local funcDef = self.funcDefs[funcName]
+	self.funcAddr[#self.funcAddr + 1] = funcName
+	print("Generating code for function " ..funcName .. "()")
+	funcDef.params = ast.paramsList
+	local hashTable = {}
+	for i = 1,#funcDef.params do
+		if hashTable[funcDef.params[i]] then
+			error("codeGenerror error: function parameter '" .. funcDef.params[i] .. "' is repeated in parameter list of function: " .. funcName)
+		end
+		hashTable[funcDef.params[i]] = true
+	end
+	if ast.defaultVal then
+		funcDef.defaultAst = ast.defaultVal
+	end
+	funcDef.code = {}
+	funcDef.locals = {}
+	funcDef.funcAddr = #self.funcAddr
+	-- main cannot take any params
+	if funcName == "main" and #funcDef.params ~= 0 then
+		error("codeGenError: main() cannot take any parameters")
+	end
+	self.params = funcDef.params
+	self.code = funcDef.code 
+	self.locals = funcDef.locals
+	if not ast.body then
+		print("Detected function prototype for function: " .. funcName)
+		funcDef.isProto = true
+		return
+	end
+	self:codeGenFuncDefBody(ast)
+end
 function PUG:codeGen(ast)
 	if ast.tag ~= "program" then
-		error("CodeGen error: ast is malformed - no program ast tag at root level")
+		error("codeGenError: ast is malformed - no program ast tag at root level")
 	end
 	for i = 1,#ast.funcDefList do
 		self:codeGenFuncDef(ast.funcDefList[i])
 	end
 	-- Note no func call to main since main cannot take parameters in the PUG language
+	for g,_ in pairs(self.globals) do
+		if self.funcDefs[g] then
+			error("codeGenError: function and global variable have same name: " .. g)
+		end
+	end
 end
 
 
