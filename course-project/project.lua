@@ -84,6 +84,9 @@ local CS = lpeg.P("]") * whitespace
 -- Pattern for print
 local PRT = lpeg.P("@") * whitespace
 
+-- Pattern for ternary operator
+local question = lpeg.P("?") * whitespace
+
 -- Patterns for type subsystem
 local indices = lpeg.Ct(lpeg.C(lpeg.P("[]"))^1) * whitespace -- capture needed to count array dimensions
 local colon = lpeg.P(":") * whitespace
@@ -132,7 +135,7 @@ local function syntaxError(inputText, lineNum, errorPos)
 end
 
 -- List of keywords
-local keywords = { "if", "elseif", "else", "while", "do", "function", "local", "new", "return", "num", "arrayof", "void"}
+local keywords = { "if", "elseif", "else", "while", "do", "function", "local", "new", "return", "num", "arrayof", "void", "unless"}
 local reserved_words = keywords
 local reserved_words_pattern = lpeg.P(false)
 for i = 1,#reserved_words do
@@ -274,6 +277,7 @@ local stat = lpeg.V"stat"
 local stats = lpeg.V"stats"
 local block = lpeg.V"block"
 local ifstat = lpeg.V"ifstat"
+local unlessstat = lpeg.V"unlessstat"
 local elseifstat = lpeg.V"elseifstat"
 local elsestat = lpeg.V"elsestat"
 local funcDef = lpeg.V"funcDef"
@@ -284,6 +288,8 @@ local base = lpeg.V"base"
 local exponent = lpeg.V"exponent"
 local prt = lpeg.V"prt"
 local typevalue = lpeg.V"typevalue"
+local logicalExp = lpeg.V"logicalExp"
+local ternaryExp = lpeg.V"ternaryExp"
 
 PUG = {
 	grammar = {}, ast = {}, funcDefs = {}, funcAddr = {}, globals = {}, nglobals = 0, globalsTypes = {},
@@ -327,9 +333,9 @@ local grammar = lpeg.P{"prog",
 					/ foldBin,
 			relExp = lpeg.Ct(addExp * ((opRel * addExp)^-1))
 					/ oneBinaryOp,
-			rvalue = newarray
-				 + (lpeg.Ct((relExp * ((opLogical * relExp)^0)))
-					/ foldBin),
+			logicalExp = (lpeg.Ct((relExp * ((opLogical * relExp)^0))) / foldBin),
+			ternaryExp = (logicalExp * question * logicalExp * colon * logicalExp) / PUG:astNode("ternaryOp", "predExp", "exp1", "exp2"),
+			rvalue = newarray + ternaryExp + logicalExp,
 			typevalue = ((KEYWORD("num") * indices) / foldArrayType)
 					+ (KEYWORD("num") / foldNumType)
 					+ (KEYWORD("void") / foldVoidType),
@@ -348,6 +354,12 @@ local grammar = lpeg.P{"prog",
 					* CP
 					* block
 					/ PUG:astNode("ifstat", "predExp", "ifBlock"),
+			unlessstat =    KEYWORD("unless")
+			                * OP 
+					* rvalue
+					* CP
+					* block
+					/ PUG:astNode("unlessstat", "predExp", "unlessBlock"),
 			elsestat = (KEYWORD("elseif") * ifstat * (elsestat^-1) / PUG:astNode("ifelsestat", "ifstat", "nestedelseifstat"))
 			           + (KEYWORD("else") 
 					* block
@@ -367,6 +379,7 @@ local grammar = lpeg.P{"prog",
 					* CP
 					/ PUG:astNode("dowhilestat", "whileBlock", "predExp")
 				+ KEYWORD("if") * ifstat * (elsestat^-1)  / PUG:astNode("ifelsestat", "ifstat", "nestedelseifstat")
+				+ unlessstat
 				+ (PRT * rvalue) / PUG:astNode("prt", "rvalue")
 				+ (KEYWORD("return") * (rvalue^0)) / PUG:astNode("returnstat", "rvalue")
 				 -- lvalue cannot occur by itself but rvalue can provided it is cast to void
@@ -526,6 +539,8 @@ function PUG:codeGenExp(ast)
 		end
 		self:codeInstr(self.expOpcodes[ast.op])
 		retType = ret1
+	elseif ast.tag == "ternaryOp" then
+		retType = self:codeGenTernaryOp(ast)
 	elseif ast.tag == "newarray" then
 		local dim = self:codeGenIndexTree(ast.indexTree, 0)
 		self:codeInstr("newarray")
@@ -536,6 +551,8 @@ function PUG:codeGenExp(ast)
 		end
 	elseif ast.tag == "funcCall" then
 		retType = self:codeGenFuncCall(ast)
+	elseif ast.tag == "ternaryOp" then
+		retType = self:codeGenTernaryOp(ast)
 	elseif ast.tag == "numericLiteral" then
 		self:codeInstr("push")
 		self:codeImm(ast.value)
@@ -846,6 +863,50 @@ function PUG:codeGenIfElseStat(ast)
 	return "void"
 end
 
+function PUG:codeGenUnlessStat(ast)
+	if ast.tag ~= "unlessstat" then
+		error("syntaxError: malformed AST: missing unlessstat ast tag in unless statement: " .. ast.tag)
+	end
+	if not ast.predExp or not ast.unlessBlock then
+		error("syntaxError: malformed AST: missing predExp or unlessBlock ast member in unless statement")
+	end
+	self:codeGenExp(ast.predExp)
+	self:codeInstr("jmpIfNZ")
+	self:codeImm(0) -- placeholder for fixup
+	local fromPC = self:codeGenGetPCHere()
+	self:codeGenBlock(ast.unlessBlock)
+	local toPC = self:codeGenGetPCHere()
+	self.code[fromPC] = toPC + 1 - fromPC
+	return "void"
+end
+
+function PUG:codeGenTernaryOp(ast)
+	if ast.tag ~= "ternaryOp" then
+		error("syntaxError: malformed AST: missing ternaryOp ast tag in ternary expression: " .. ast.tag)
+	end
+	if not ast.predExp or not ast.exp1 or not ast.exp2 then
+		error("syntaxError: malformed AST: missing predicate or expression1 or expression2 in ternary expression")
+	end
+	self:codeGenExp(ast.predExp)
+	self:codeInstr("jmpIfZ")
+	self:codeImm(0) -- placeholder for fixup
+	local fromPC = self:codeGenGetPCHere()
+	ret1 = self:codeGenExp(ast.exp1)
+	self:codeInstr("jmp")
+	self:codeImm(0) -- placeholder for fixup2
+	local fromPC2 = self:codeGenGetPCHere()
+	local toPC = self:codeGenGetPCHere()
+	self.code[fromPC] = toPC + 1 - fromPC
+	ret2 = self:codeGenExp(ast.exp2)
+	if ret1 ~= ret2 or ret1 == "void" then
+		error("typeCheckError: ternaryOP must return same type for both branches and be non void: exp1(" .. ret1 .. ") and exp2(" .. ret2 .. ")")
+	end
+	local toPC2 = self:codeGenGetPCHere()
+	self.code[fromPC2] = toPC2 + 1 - fromPC2 
+	return ret1
+end
+
+
 --[[
 function PUG:codeGenVar(ast)
 	if ast.tag ~= "var" then
@@ -885,6 +946,11 @@ function PUG:codeGenStat(ast)
 		end
 	elseif ast.tag == "dowhilestat" then
 		retType = self:codeGenDoWhileStat(ast)
+		if retType ~= "void" then
+			error("typeCheckError: statement return type should be void")
+		end
+	elseif ast.tag == "unlessstat" then
+		retType = self:codeGenUnlessStat(ast)
 		if retType ~= "void" then
 			error("typeCheckError: statement return type should be void")
 		end
@@ -1294,7 +1360,7 @@ function PUG:runFunc(funcDef, top)
 			elseif self.stack[top] == 1 then
 				pc = pc + 2
 			else 
-				error("runTimeError: Invalid code generation - boolean value is neither 0 or 1: " .. self.stack[top])
+				error("runTimeError: boolean value is neither 0 or 1: " .. self.stack[top])
 			end
 			top = top - 1
 		elseif code[pc] == "jmpIfNZ" then
@@ -1303,7 +1369,7 @@ function PUG:runFunc(funcDef, top)
 			elseif self.stack[top] == 0 then
 				pc = pc + 2
 			else 
-				error("runTimeError: Invalid code generation - boolean value is neither 0 or 1: " .. self.stack[top])
+				error("runTimeError: boolean value is neither 0 or 1: " .. self.stack[top])
 			end
 			top = top - 1
 		elseif code[pc] == "jmp" then

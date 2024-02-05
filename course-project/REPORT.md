@@ -69,6 +69,10 @@ Here is a brief description of the syntax of the PUG language (named after my fa
 35. arrays can be allocated to all three types of variables - global, local and function parameters.
 36. arrays can be printed.
 37. arrays cannot be returned from functions, passed to functions or be function parameters.
+38. [Basic expectation]: ternary operators are supported. They work in the normal C function with short-circuit
+    evaluation. In (a > b) ? exp1 : exp2, both exp1 and exp2 must be of same type and also non-void type. 
+39. [basic expectation]: unless statement is supported. unless (exp) is true the unless-block is executed.
+40. [challenge expectation]: a type system as outlined in previous lines is implemented.
 
 ## New Features/Changes
 
@@ -143,6 +147,18 @@ The following new feature has been added:
 35. locals-override-globals.pug - locals override global variables.
 36. parameters-override-globals.pug - function parameters override global variables.
 37. parameters-are-tmp-lvalues.pug - parameters are assigned to but they are not copied back to caller environment.
+38. ternary-operator.pug - shows both outcomes of a ternary operator
+39. unless-statement.pug - shows both outcomes of unless operator
+40. if-statement.pug - shows an if-statement
+41. if-else-statement.pug - shows an if-else-statement
+42. if-elseif-else-statement.pug - shows an if-else-elseif statement
+43. while-statement.pug - shows a while statement
+44. do-while-statement.pug - shows a do-while loop with unconditional execution of first loop
+45. do-while-statement-take-2.pug - shows a do-while loop with multiple loops
+46. [wart]: boolean-expression-must-be-result-of-relational.pug - shows that program fails if boolean expression is
+    not result of relational expression. This is a wart because it is a runtime error rather than a compile time error.
+    Note that my type system does not implement a boolean type.
+    
 
 * Tradeoffs and limitations:
 1. arrays cannot be passed as parameters to functions or be returned from functions.
@@ -190,6 +206,14 @@ In this section, discuss the future of your language / DSL, such as deployabilit
 ## Self assessment
 
 * Self assessment of your project: for each criteria described on the final project specs, choose a score (1, 2, 3) and explain your reason for the score in 1-2 sentences.
+1. Language Completeness - self assessment 3 - implemented both 2 basic features (unless statement and ternary operator)
+   as well as a challenge feature (type system)
+2. Code Quality and Report - self-assesment 2 - plus points: working code, comprehensive report, comprehensive
+   documentation and comprehensive sample programs. minus points - sub-par error reporting. While syntax error
+   shows approximate location of error, no message says what exactly is wrong.
+3. Originality and Scope - self-assesment 2.5 - while what I have implemented cannot probably be classified
+   as a minor extension in my honest opinion it is not original enough or large enough to deserve a 3 - 
+   so I think this is somewhere in-between so 2.5 points
 
 * Have you gone beyond the base requirements? How so?
   I have attempted to go beyond the base requirement by implementing a type system which was suggested by the
