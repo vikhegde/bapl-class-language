@@ -1,3 +1,9 @@
+
+
+-- TODO
+-- nested blocks
+-- writeup
+
 local lpeg = require"lpeg"
 local pt = require"pt"
 
@@ -54,7 +60,6 @@ local opRel = lpeg.C(lpeg.P("<=") + lpeg.P(">=") + lpeg.P("<") + lpeg.P(">") + l
 
 local opAssign = lpeg.P("=") * whitespace
 
-
 -- Pattern for alphanumeric words with underscores
 -- Dont add whitespace for following group
 local alphaNumUnderscore = lpeg.R("az", "AZ", "09", "__")
@@ -84,6 +89,10 @@ local CS = lpeg.P("]") * whitespace
 
 -- Pattern for print
 local PRT = lpeg.P("@") * whitespace
+
+-- Patterns for type subsystem
+local indices = lpeg.Ct(lpeg.C(lpeg.P("[]"))^1) * whitespace -- capture needed to count array dimensions
+local colon = lpeg.P(":") * whitespace
 
 local function syntaxError(inputText, lineNum, errorPos)
 	print("\nsyntaxError: Compile failed at line: " .. tostring(lineNum) .. "\n")
@@ -129,13 +138,13 @@ local function syntaxError(inputText, lineNum, errorPos)
 end
 
 -- List of keywords
-local keywords = { "and", "or", "if", "elseif", "else", "while", "do", "function", "local", "new", "return"}
+local keywords = { "and", "or", "if", "elseif", "else", "while", "do", "function", "local", "new", "return", "num", "arrayof", "void"}
 local reserved_words = keywords
 local reserved_words_pattern = lpeg.P(false)
 for i = 1,#reserved_words do
 	reserved_words_pattern = reserved_words_pattern + reserved_words[i]
 end
-reserved_words_pattern = (reserved_words_pattern) * whitespace
+reserved_words_pattern = (reserved_words_pattern) * -1
 
 function KEYWORD(token)
 	assert(reserved_words_pattern:match(token))
@@ -175,7 +184,7 @@ local function foldUnary(lst)
 		elseif lst[i] == "-" then
 			accum = -accum
 		else
-			error("SyntaxError: Invalid unary iadditive operator")
+			error("syntaxError: Invalid unary iadditive operator")
 		end
 	end
 	local tree = lst[#lst]
@@ -184,7 +193,7 @@ local function foldUnary(lst)
 	elseif accum == -1 then
 		tree = { tag = "binaryOp", exp1 = tree, op = "*", exp2 = { tag = "numericLiteral", value = -1 }}	
 	else
-		error("internalError: Chained unary signs have magnitude != 1")
+		error("PUG parser: internalError: Chained unary signs have magnitude != 1")
 	end
 	return tree
 end
@@ -196,7 +205,7 @@ local function oneBinaryOp(lst)
 	elseif #lst == 3 then
 		tree = { tag = "binaryOp", exp1 = tree, op = lst[2], exp2 = lst[3] }
 	else
-		error("SyntaxError: invalid relational expression")
+		error("syntaxError: invalid relational expression")
 	end
 	return tree
 end
@@ -223,19 +232,33 @@ local function foldNewIndex(lst)
 	return tree
 end
 
+local function foldNumType(lst)
+	local tree = { tag = "type", typeval = "num"}
+	return tree
+end
+
+local function foldVoidType(lst)
+	local tree = { tag = "type", typeval = "void"}
+	return tree
+end
+
+local function foldArrayType(lst)
+	local tree = { tag = "type", typeval = "num" .. table.concat(lst)}
+	return tree
+end
 
 local start_id = -1
 local stop_id = -1
 ID = lpeg.C(alphaUnderscore *
 			lpeg.P(function(s,p) 
-				start_id = p
+				start_id = p - 1
 				return true
 			end)
 			*
 			alphaNumUnderscore^0
 			*
 			function(s,p)
-				stop_id = p
+				stop_id = p - 1
 				if reserved_words_pattern:match(string.sub(s,start_id, stop_id)) then
 					return false
 				else
@@ -266,9 +289,11 @@ local newarray = lpeg.V"newarray"
 local base = lpeg.V"base"
 local exponent = lpeg.V"exponent"
 local prt = lpeg.V"prt"
+local typevalue = lpeg.V"typevalue"
 
 PUG = {
-	grammar = {}, ast = {}, funcDefs = {}, funcAddr = {}, globals = {}, nglobals = 0, locals = {}, blkNest = 0,
+	grammar = {}, ast = {}, funcDefs = {}, funcAddr = {}, globals = {}, nglobals = 0, globalsTypes = {},
+	localsCountList = {},
         expOpcodes = { ["+"] = "add", ["-"] = "sub", ["/"] = "div", ["*"] = "mul", ["%"] = "mode", ["^"] = "exp",
 	               ["<="] = "leq", ["<"] = "lt", [">="] = "geq", [">"] = "gt", ["=="] = "eq", ["!="] = "neq"},
 	stack = {}, mem = {}
@@ -311,10 +336,13 @@ local grammar = lpeg.P{"prog",
 			rvalue = newarray
 				 + (lpeg.Ct((relExp * ((opLogical * relExp)^0)))
 					/ foldBin),
+			typevalue = ((KEYWORD("num") * indices) / foldArrayType)
+					+ (KEYWORD("num") / foldNumType)
+					+ (KEYWORD("void") / foldVoidType),
 			-- a parenthesized lvalue is not legal
-			lvalue = ((KEYWORD("local") * array) / PUG:astNode("lvar", "array")) 
-					+ ((KEYWORD("local") * ID) / PUG:astNode("lvar", "name"))
-					+ array
+			lvalue = 	((KEYWORD("local") * typevalue * ID) / PUG:astNode("lvar", "decltype", "name"))
+					+ (typevalue * ID / PUG:astNode("var", "decltype", "name"))
+					+ (array / PUG:astNode("array", "array")) 
 					+ (ID / PUG:astNode("var", "name")),
 			funcCall = (ID * OP * lpeg.Ct((rvalue * ((comma * rvalue) ^ 0))^0) * CP)
 					/ PUG:astNode("funcCall", "funcName", "argsList"),
@@ -347,37 +375,38 @@ local grammar = lpeg.P{"prog",
 				+ KEYWORD("if") * ifstat * (elsestat^-1)  / PUG:astNode("ifelsestat", "ifstat", "nestedelseifstat")
 				+ (PRT * rvalue) / PUG:astNode("prt", "rvalue")
 				+ (KEYWORD("return") * (rvalue^0)) / PUG:astNode("returnstat", "rvalue")
-			        + rvalue   -- lvalue cannot occur by itself but rvalue can
+				 -- lvalue cannot occur by itself but rvalue can provided it is cast to void
+			        + (OP * KEYWORD("void") * CP * rvalue) / PUG:astNode("voidstat", "rvalue")
+			        + rvalue / PUG:astNode("rvaluestat", "rvalue")
+				+ block -- nested block
 				)  -- empty statements are valid
 				* (terminator^1) + (terminator^1),   -- multiple terminators ;;;; are legal
 			stats = lpeg.Ct(stat ^ 0),
                         -- ; after function-body-block is not legal. ; after if-block is legal
                         -- empty block is legal
 			block = OB * stats^-1 * CB / PUG:astNode("block", "stats"),
-			funcDef = (KEYWORD("function")
+			funcDef = (typevalue * KEYWORD("function")
 					* ID 
-					* OP * lpeg.Ct((ID * (comma * ID)^0)^0) 
+					* OP * lpeg.Ct((ID * colon * typevalue * (comma * ID * colon * typevalue)^0)^0) 
 					* (equals * rvalue)
 					* CP
 					* block
-					) / PUG:astNode("funcDef", "funcName", "paramsList", "defaultVal", "body")
-				   + ((KEYWORD("function")
+					) / PUG:astNode("funcDef", "retType", "funcName", "paramsList", "defaultVal", "body")
+				   + ((typevalue * KEYWORD("function")
 					* ID 
-					* OP * lpeg.Ct((ID * (comma * ID)^0)^0) 
+					* OP * lpeg.Ct((ID * colon * typevalue * (comma * ID * colon * typevalue)^0)^0) 
 					* (equals * rvalue)
 					* CP
-					* terminator 
-					)/ PUG:astNode("funcDef", "funcName", "paramsList", "defaultVal"))
-				   + ((KEYWORD("function")
+					)/ PUG:astNode("funcDef", "retType", "funcName", "paramsList", "defaultVal"))
+				   + ((typevalue * KEYWORD("function")
 					* ID 
-					* OP * lpeg.Ct((ID * (comma * ID)^0)^0) * CP
+					* OP * lpeg.Ct((ID * colon * typevalue * (comma * ID * colon * typevalue)^0)^0) * CP
 					* block
-					) / PUG:astNode("funcDef", "funcName", "paramsList", "body"))
-				   +  ((KEYWORD("function")
+					) / PUG:astNode("funcDef", "retType", "funcName", "paramsList", "body"))
+				   +  ((typevalue * KEYWORD("function")
 					* ID 
-					* OP * lpeg.Ct((ID * (comma * ID)^0)^0) * CP
-					* terminator
-					) / PUG:astNode("funcDef", "funcName", "paramsList"))
+					* OP * lpeg.Ct((ID * colon * typevalue * (comma * ID * colon * typevalue)^0)^0) * CP
+					) / PUG:astNode("funcDef", "retType", "funcName", "paramsList"))
 
 		}
 
@@ -416,9 +445,9 @@ end
 
 function PUG:codeGenIndexTree(ast, dim)
 	if ast.tag ~= "arrayIndex" then
-		error("codeGenError - malformed ast - indextree ast has no arrayIndex tag: " .. ast.tag)
+		error("syntaxError - malformed AST - indextree ast has no arrayIndex tag: " .. ast.tag)
 	elseif not ast.index then
-		error("codeGenError - malformed ast - indextree ast has no index member")
+		error("syntaxError - malformed AST - indextree ast has no index member")
 	else
 		self:codeGenExp(ast.index)
 		dim = dim + 1
@@ -431,16 +460,16 @@ end
 
 function PUG:codeGenFuncCall(ast)
 	if ast.tag ~= "funcCall" then
-		error("codeGenError - malformed ast - function call ast has no funcCall tag: " .. ast.tag)
+		error("syntaxError - malformed AST - function call ast has no funcCall tag: " .. ast.tag)
 	end
 	local funcDef = self.funcDefs[ast.funcName]
 	if not funcDef then
-		error("codeGenError - function call to undefined function: " .. ast.funcName)
-	elseif (#funcDef.params ~= #ast.argsList) and (not funcDef.defaultAst or #ast.argsList ~= #funcDef.params - 1) then
-		error("codeGenError - function " .. ast.funcName .."() #args " .. #ast.argsList .. " != #params " .. #funcDef.params) 
+		error("declarationError - function call to undefined function: " .. ast.funcName)
+	elseif (#funcDef.paramsTypes["params"] ~= #ast.argsList) and (not funcDef.defaultAst or #ast.argsList ~= #funcDef.paramsTypes["params"] - 1) then
+		error("typeCheckError - function " .. ast.funcName .."() #args " .. #ast.argsList .. " != #params " .. #funcDef.paramsTypes["params"]) 
 	end
 
-	if #ast.argsList == #funcDef.params - 1 then
+	if #ast.argsList == #funcDef.paramsTypes["params"] - 1 then
 		assert(funcDef.defaultAst)
 		self:codeGenExp(funcDef.defaultAst) -- generate final argument with default value in stack (if needed)
 	end
@@ -451,12 +480,14 @@ function PUG:codeGenFuncCall(ast)
 		self:codeInstr("push") -- Push to create space for local parameters
 		self:codeImm(0)
 	end
-	self:codeInstr("call") -- Push to create space for local parameters
+	self:codeInstr("call")
 	self:codeImm(funcDef.funcAddr)
+	return funcDef.retType
 end
 	
 
 function PUG:codeGenExp(ast)
+	local retType = "noType"
 	if ast.tag == "var" then
 		-- locals, then function parameters then globals
 		local resolved = false
@@ -465,43 +496,57 @@ function PUG:codeGenExp(ast)
 				self:codeInstr("lload")
 				self:codeImm(i)
 				resolved = true
+				retType = self.localsTypes[i]
 				break
 			end
 		end
 		if not resolved then
-			for i = 1,#self.params do
-				if self.params[i] == ast.name then
+			for i = 1,#self.paramsTypes["params"] do
+				if self.paramsTypes["params"][i] == ast.name then
 					self:codeInstr("pload")
 					self:codeImm(i)
 					resolved = true
+					retType = self.paramsTypes["types"][i]
 					break
 				end
 			end
 		end
 		if not resolved then
 			if not self.globals[ast.name] then
-				error("codeGenError: undefined global: " .. ast.name)
+				error("declarationError: undefined global: " .. ast.name)
 			end
 			self:codeInstr("load")
 			self:codeImm(self.globals[ast.name])
 			resolved = true
+			retType = self.globalsTypes[ast.name]
 		end
 	elseif ast.tag == "binaryOp" then
-		self:codeGenExp(ast.exp1)
-		self:codeGenExp(ast.exp2)
+		local ret1 = self:codeGenExp(ast.exp1)
+		local ret2 = self:codeGenExp(ast.exp2)
+		if ret1 ~= ret2 then
+			error("TypeCheck: type mismatch between LHS (" .. ret1 .. ") and RHS (" .. ret2 .. ") of binary op: " .. ast.op)
+		else
+			print("typecheck success")
+		end
 		self:codeInstr(self.expOpcodes[ast.op])
+		retType = ret1
 	elseif ast.tag == "newarray" then
 		local dim = self:codeGenIndexTree(ast.indexTree, 0)
 		self:codeInstr("newarray")
 		self:codeImm(dim)
+		retType = "num"
+		for i = 1, dim do
+			retType = retType .. "[]"
+		end
 	elseif ast.tag == "funcCall" then
-		self:codeGenFuncCall(ast)
+		retType = self:codeGenFuncCall(ast)
 	elseif ast.tag == "numericLiteral" then
 		self:codeInstr("push")
 		self:codeImm(ast.value)
+		return "num"
 	elseif ast.tag == "array" then
 		if not ast.array or not ast.indexTree then
-			error("codeGenError - malformed ast - missing array or indexTree element in rvalue array ast")
+			error("syntaxError - malformed AST - missing array or indexTree element in rvalue array ast")
 		end
 		local dim = self:codeGenIndexTree(ast.indexTree, 0)
 		local resolved = false
@@ -510,38 +555,151 @@ function PUG:codeGenExp(ast)
 				self:codeInstr("larrayget")
 				self:codeImm(i)
 				resolved = true
+				retType = self.localsTypes[i]
 				break
 			end
 		end
 		if not resolved then
 			local gptr = self.globals[ast.array]
 			if not gptr then
-				error("codeGenError: malformed ast - failed to resolve array name in array rvalue: " .. ast.array)
+				error("declarationError - failed to resolve array name in array rvalue: " .. ast.array)
 			end
 			self:codeInstr("arrayget")
 			self:codeImm(gptr)
+			retType = self.globalsTypes[ast.array]
 		end
 		self:codeImm(dim)
+		while dim >= 1 do
+			if string.sub(retType,#retType-1,#retType) == "[]" then
+				retType = string.sub(retType, 1, #retType-2)
+			elseif retType == "num" then
+				error("typeCheckError: attempting to apply index to a number")
+			else
+				error("typeCheckError: attempting to apply index to a non-array type")
+			end
+			dim = dim - 1
+		end
 	else 
-		error("codeGenError - malformed ast - unrecognized ast tag: " .. ast.tag)
+		error("syntaxError - malformed AST - unrecognized ast tag: " .. ast.tag)
 	end
+	if retType == "noType" or retType == nil then
+		error("typeCheckError: expression has no type: " .. pt.pt(ast))
+	end
+	return retType
 end
 
 function PUG:codeGenLvalue(ast)
+	local retType = "noType"
 	if ast.tag == "var" then
-		if not self.globals[ast.name] then
-		    self.nglobals = self.nglobals + 1
-		    self.globals[ast.name] = self.nglobals
+		if ast["decltype"] then
+			if ast.name then
+				if self.globals[ast.name] then
+					error("declarationnError; new type declaration found for a global that was declared previously")
+				elseif string.sub(ast["decltype"].typeval, #ast["decltype"].typeval - 1, #ast["decltype"].typeval) == "[]" then
+					local arraytype = ast["decltype"].typeval
+					local dim = 0
+					for i = 4,#arraytype,2 do
+						local subscript = string.sub(arraytype,i,i+1)
+						if  subscript ~= "[]" then
+							error("typeCheckError: type declaration for array has non-subscript operator" .. subscript)
+						end
+						dim = dim + 1
+					end
+		    			self.nglobals = self.nglobals + 1
+		    			self.globals[ast.name] = self.nglobals
+					retType = ast["decltype"].typeval
+					self.globalsTypes[ast.name] = retType 
+					local gptr = self.nglobals
+					self:codeInstr("arrayalloc")
+					self:codeImm(gptr)
+					self:codeImm(dim)
+					retType = self.globalsTypes[ast.name]
+				else
+		    			self.nglobals = self.nglobals + 1
+		    			self.globals[ast.name] = self.nglobals
+					self.globalsTypes[ast.name] = ast["decltype"].typeval
+					retType = self.globalsTypes[ast.name]
+					self:codeInstr("store")
+					self:codeImm(self.globals[ast.name])
+				end
+			else
+				error("typeCheckError: new typed declaration found for a global with no name ast element")
+			end
+		else
+			if ast.name then
+				local resolved = false
+				for i = 1,#self.paramsTypes["params"] do
+					if self.paramsTypes["params"][i] == ast.name then
+						self:codeInstr("pstore")
+						self:codeImm(i)
+						resolved = true
+						retType = self.paramsTypes["types"][i]
+						break
+					end
+				end
+				if not resolved and not self.globals[ast.name] then
+					error("declarationError: reference to lvalue global that was not declared previously")
+				elseif not resolved then
+					self:codeInstr("store")
+					self:codeImm(self.globals[ast.name])
+					retType = self.globalsTypes[ast.name]
+				end
+			else
+				error("syntaxError: malformed AST: lvalue global var ast with no name ast element")
+			end
 		end
-		self:codeInstr("store")
-		self:codeImm(self.globals[ast.name])
 	elseif ast.tag == "lvar" then
-		self.locals[#self.locals + 1] = ast.name
-		self:codeInstr("lstore")
-		self:codeImm(#self.locals)
+		if ast["decltype"] then
+			if ast.name then
+				if self.localsTypes[ast.name] then
+					error("declarationError: new type declaration found for a local that was declared previously")
+				elseif string.sub(ast["decltype"].typeval, #ast["decltype"].typeval - 1, #ast["decltype"].typeval) == "[]" then
+					local arraytype = ast["decltype"].typeval
+					local dim = 0
+					for i = 4,#arraytype,2 do
+						local subscript = string.sub(arraytype,i,i+1)
+						if  subscript ~= "[]" then
+							error("typeCheckError: type declaration for array has non-subscript operator" .. subscript)
+						end
+						dim = dim + 1
+					end
+					self.locals[#self.locals + 1] = ast.name
+					self.localsTypes[#self.locals] = ast["decltype"].typeval
+					self.localsCountsList[#self.localsCountsList] 
+						= self.localsCountsList[#self.localsCountsList] + 1
+					retType = ast["decltype"].typeval
+					self.localsTypes[ast.name] = retType 
+					self:codeInstr("larrayalloc")
+					self:codeImm(#self.locals)
+					self:codeImm(dim)
+					retType = self.localsTypes[ast.name]
+				else
+					self.locals[#self.locals + 1] = ast.name
+					self.localsTypes[#self.locals] = ast["decltype"].typeval
+					self.localsCountsList[#self.localsCountsList] 
+						= self.localsCountsList[#self.localsCountsList] + 1
+					self:codeInstr("lstore")
+					self:codeImm(#self.locals)
+					retType = self.localsTypes[#self.locals] 
+				end
+			else
+				error("syntaxError: malformed AST: new typed declaration for a local with no name ast element")
+			end
+		else
+			if ast.name then
+				self:codeInstr("lstore")
+				self:codeImm(#self.locals)
+				retType = self.localsTypes[ast.name] 
+			else
+				error("syntaxError: malformed AST: lvalue local var ast with no name ast element")
+			end
+		end
 	elseif ast.tag == "array" then
-		if not ast.array or not ast.indexTree then
-			error("codeGenError - malformed ast - missing array or indexTree element in lvalue array ast")
+		if not ast.indexTree then
+			ast = ast.array
+		end
+		if not ast.indexTree then
+			error("syntaxError: malformed AST: no indexTree element in array ast")
 		end
 		local dim = self:codeGenIndexTree(ast.indexTree, 0)
 		local resolved = false
@@ -550,25 +708,40 @@ function PUG:codeGenLvalue(ast)
 				self:codeInstr("larrayset")
 				self:codeImm(i)
 				resolved = true
+				retType = self.localsTypes[i]
 				break
+			end
+		end
+		for i = 1,#self.paramsTypes["params"] do
+			if self.paramsTypes["params"][i] == ast.array then
+				error("typeCheckError: array name (" .. ast.array ..") matches a function parameter. Arrays are not allowed as function parameters")
 			end
 		end
 		if not resolved then
 			local gptr = self.globals[ast.array]
 			if not gptr then
-				error("codeGenError: malformed ast - failed to resolve array name in array lvalue: " .. ast.array)
+				error("declarationError: failed to resolve array name in array lvalue: " .. ast.array)
 			end
 			self:codeInstr("arrayset")
 			self:codeImm(gptr)
+			retType = self.globalsTypes[ast.array]
 		end
 		self:codeImm(dim)
-
+		while dim >= 1 do
+			if string.sub(retType,#retType-1,#retType) == "[]" then
+				retType = string.sub(retType, 1, #retType-2)
+			elseif retType == "num" then
+				error("typeCheckError: attempting to apply index to a number")
+			else
+				error("typeCheckError: attempting to apply index to a non-array type")
+			end
+			dim = dim - 1
+		end
 	else
 
-		error("codeGenError: maalformed ast - unrecognized Lvalue tag: " .. ast.tag)
+		error("syntaxError: malformed AST - unrecognized Lvalue tag: " .. ast.tag)
 	end
-
-
+	return retType
 end
 
 function PUG:codeGenGetPCHere()
@@ -577,13 +750,13 @@ end
 
 function PUG:codeGenWhileStat(ast)
 	if ast.tag ~= "whilestat" then
-		error("codeGenError: missing whilestat ast tag in while statement: " .. ast.tag)
+		error("syntaxError: malformed AST: missing whilestat ast tag in while statement: " .. ast.tag)
 	end
 	if not ast.predExp then
-		error("codeGenError: missing predExp ast member in while statement")
+		error("syntaxError: malformed AST: missing predExp ast member in while statement")
 	end
 	if not ast.whileBlock then
-		error("codeGenError: missing whileBlock ast member in while statement")
+		error("syntaxError: malformed AST: missing whileBlock ast member in while statement")
 	end
 	local toPC2 = self:codeGenGetPCHere()
 	self:codeGenExp(ast.predExp)
@@ -597,17 +770,18 @@ function PUG:codeGenWhileStat(ast)
 	self.code[fromPC] = toPC + 1 - fromPC -- skip while block
 	local fromPC2 = toPC
 	self.code[fromPC2] = toPC2 + 1 - fromPC2
+	return "void"
 end
 
 function PUG:codeGenDoWhileStat(ast)
 	if ast.tag ~= "dowhilestat" then
-		error("codeGenError: missing dowhilestat ast tag in do-while statement: " .. ast.tag)
+		error("syntaxError: malformed AST: missing dowhilestat ast tag in do-while statement: " .. ast.tag)
 	end
 	if not ast.predExp then
-		error("codeGenError: missing predExp ast member in do-while statement")
+		error("syntaxError: malformed AST: missing predExp ast member in do-while statement")
 	end
 	if not ast.whileBlock then
-		error("codeGenError: missing while-Block ast member in do-while statement")
+		error("syntaxError: malformed AST: missing while-Block ast member in do-while statement")
 	end
 	local toPC = self:codeGenGetPCHere()
 	self:codeGenBlock(ast.whileBlock)
@@ -615,28 +789,29 @@ function PUG:codeGenDoWhileStat(ast)
 	self:codeInstr("jmpIfNZ")
 	local fromPC = self:codeGenGetPCHere()
 	self:codeImm(toPC + 1 - (fromPC + 1))
+	return "void"
 end
 
 function PUG:codeGenElseStat(ast)
 	if ast.tag ~= "elsestat" then
-		error("codeGenError: missing elsestat ast tag in else statement: " .. ast.tag)
+		error("syntaxError: malformed AST: missing elsestat ast tag in else statement: " .. ast.tag)
 	end
 	if not ast.elseBlock then
-		error("codeGenError: missing elseBlock ast member in else statement")
+		error("syntaxError: malformed AST: missing elseBlock ast member in else statement")
 	end
-	self:codeGenBlock(ast.elseBlock)
+	return self:codeGenBlock(ast.elseBlock)
 end
 
 function PUG:codeGenIfElseStat(ast)
 	if ast.tag ~= "ifelsestat" then
-		error("codeGenError: missing ifelsestat ast tag in if statement: " .. ast.tag)
+		error("syntaxError: malformed AST: missing ifelsestat ast tag in if statement: " .. ast.tag)
 	end
 	if not ast.ifstat or not ast.ifstat.predExp then
-		error("codeGenError: missing ifstat or ifstat.predExp ast member in if statement")
+		error("syntaxError: malformed AST: missing ifstat or ifstat.predExp ast member in if statement")
 	end
 	self:codeGenExp(ast.ifstat.predExp)
 	if not ast.ifstat.ifBlock then
-		error("codeGenError: missing ifBlock ast member in if statement")
+		error("syntaxError: malformed AST: missing ifBlock ast member in if statement")
 	end
 	self:codeInstr("jmpIfZ")
 	self:codeImm(0) -- placeholder for fixup
@@ -652,107 +827,224 @@ function PUG:codeGenIfElseStat(ast)
 	end
 	local toPC2 = self:codeGenGetPCHere()
 	self.code[fromPC2] = toPC2 + 1 - fromPC2 
-end
-
-
-function PUG:codeGenRvalue(ast)
-	if ast.tag ~= "rvalue" then
-		error("codeGenError rvalue ast tag not found in rvalue code statement: " .. ast.tag)
-	end
-	self:codeGenExp(ast)
-	self:codeInstr("pop")
-	self:codeImm(1)
+	return "void"
 end
 
 function PUG:codeGenVar(ast)
 	if ast.tag ~= "var" then
-		error("codeGenError var ast tag not found in var code statement: " .. ast.tag)
+		error("syntaxError: malformed AST:  var ast tag not found in var code statement: " .. ast.tag)
 	end
-	self:codeGenExp(ast)
+	local retType = self:codeGenExp(ast)
 	self:codeInstr("pop")
 	self:codeImm(1)
+	return retType
 end
 
 function PUG:codeGenStat(ast)
+	local retType = "notype"
 	if ast.tag == "assign" then
-		self:codeGenExp(ast.rvalue)
-		self:codeGenLvalue(ast.lvalue)
+		local ret1 = self:codeGenExp(ast.rvalue)
+		local ret2 = self:codeGenLvalue(ast.lvalue)
+		if ret1 ~= ret2 then
+			-- NOTE ret2 is LHS and ret1 is RHS
+			error("typeCheckError: assignment: LHS type (" .. ret2 .. ") != RHS type (" .. ret1 .. ")")
+		end
+		retType = "void"
 	elseif ast.tag == "ifelsestat" then
-		self:codeGenIfElseStat(ast)
+		retType = self:codeGenIfElseStat(ast)
+		if retType ~= "void" then
+			error("typeCheckError: statement return type should be void")
+		end
 	elseif ast.tag == "elsestat" then
-		self:codeGenElseStat(ast)
+		retType = self:codeGenElseStat(ast)
+		if retType ~= "void" then
+			error("typeCheckError: statement return type should be void")
+		end
 	elseif ast.tag == "whilestat" then
-		self:codeGenWhileStat(ast)
+		retType = self:codeGenWhileStat(ast)
+		if retType ~= "void" then
+			error("typeCheckError: statement return type should be void")
+		end
 	elseif ast.tag == "dowhilestat" then
-		self:codeGenDoWhileStat(ast)
+		retType = self:codeGenDoWhileStat(ast)
+		if retType ~= "void" then
+			error("typeCheckError: statement return type should be void")
+		end
 	elseif ast.tag == "prt" then
-		self:codeGenExp(ast.rvalue)
+		if ast.rvalue == nil then
+			error("syntaxError: print statement with no rvalue")
+		end
+		local expType = self:codeGenExp(ast.rvalue)
+		if expType == "void" then
+			error("typeCheckError: print statement with void rvalue: " .. pt.pt(ast.rvalue))
+		end	
 		self:codeInstr("prt")
+		retType = "void"
 	elseif ast.tag == "returnstat" then
 		if ast.rvalue then
-			self:codeGenExp(ast.rvalue)
+			local expType = self:codeGenExp(ast.rvalue)
+			if expType ~= self.retType then
+				error("typeCheckError: function returntype (" .. self.retType .. ") != return expression type (" .. expType .. ")")
+			end
+
+			if self.retType == "void" and expType ~= "void" then
+				error("typeCheckError: function returns void but return statement has a non-void return value")
+			end
+			retType = expType
+		else
+			retType = "void"
 		end
 		self:codeInstr("ret")
-		self:codeImm(#self.params + #self.locals) -- pop argument to ret - number of funcparams and locals
-	elseif ast.tag == "rvalue" then
-		self:codeGenRvalue(ast)
+		-- pop argument to ret - number of funcparams.
+		--locals freed by block exit
+		self:codeImm(#self.paramsTypes["params"]) 
 	elseif ast.tag == "var" then
-		self:codeGenVar(ast)
+		error("This should not happen")
+		local expType = self:codeGenVar(ast)
+		if expType == nil then
+			error("typeCheckError: rvalue has no type" .. pt.pt(ast.rvalue))
+		end
+		retType = "void"
+	elseif ast.tag == "voidstat" then
+		if ast.rvalue == nil then
+			error("typeCheckError: cast to void for nonexistent rvalue")
+		end
+		local expType = self:codeGenExp(ast.rvalue)
+		if expType == nil then
+			error("typeCheckError: rvalue has no type" .. pt.pt(ast.rvalue))
+		end
+		if expType ~= "void" then
+			self:codeInstr("pop")
+			self:codeImm(1)
+		end
+		retType = "void"
+	elseif ast.tag == "rvaluestat" then
+		-- valid only if rvalue evaluates to void type
+		if ast.rvalue == nil then
+			error("syntaxError: rvalue statement has nonexistent rvalue")
+		end
+		local expType = self:codeGenExp(ast.rvalue)
+		if expType == nil then
+			error("typeCheckError: rvalue has no type" .. pt.pt(ast.rvalue))
+		end
+		if expType ~= "void" then
+			error("typeCheckError: rvalue statement is only valid if it is of type void: type " .. expType)
+		end
+		self:codeInstr("pop")
+		self:codeImm(1)
+		retType = expType
+	elseif ast.tag == "block" then
+		retType = self:codeGenBlock(ast)
+		if retType ~= "void" then
+			error("typeCheckError: block type != void: type " .. expType)
+		end
 	else
-		error("codeGenError: malformed ast - unrecognized statement tag: " .. ast.tag)
+		error("syntaxError: malformed AST - unrecognized statement ast: " .. pt.pt(ast.tag))
 	end
+	return retType
 	
 end
 
 function PUG:codeGenBlock(ast)
 	if ast.tag ~= "block" then
-		error("codeGenError: ast is malformed - no block ast tag at block level")
+		error("syntaxError: AST is malformed - no block ast tag at block level")
 	end
 	if not ast.stats then
 		return -- empty function body
 	end
+	self.localsCountsList[#self.localsCountsList + 1] = 0
 	for i = 1,#ast.stats do
-		self:codeGenStat(ast.stats[i])
+		local retType = self:codeGenStat(ast.stats[i])
+		if retType ~= "void" and retType ~= self.retType then
+			error("typeCheckError: return statement value type (" .. retType .. ") != function return type (" .. self.retType .. ")")
+		elseif self.retType == "void" and retType ~= "void" then 
+			error("typeCheckError: return statement value type (" .. retType .. ") != function return type (" .. self.retType .. ")")
+		end
 	end
+	-- pop locals for this block (includes function blocks)
+	for i = 1,self.localsCountsList[#self.localsCountsList] do
+		self.locals[i] = nil
+		self.localsTypes[i] = nil
+		self:codeInstr("pop")
+		self:codeImm(1)
+	end
+	self.localsCountsList[#self.localsCountsList] = nil
+	-- block returns void type
+	return "void"
 end
 
 function PUG:codeGenFuncDefBody(ast)
-	self:codeGenBlock(ast.body)
+	local retType = self:codeGenBlock(ast.body)
 	-- code to return a return value for a function in the event it does not have an explicit return
-	self:codeInstr("push")
-	self:codeImm(0)
+	if self.retType ~= "void" then
+		self:codeInstr("push")
+		self:codeImm(0)
+	end
 	self:codeInstr("ret")
-	self:codeImm(#self.params + #self.locals) -- pop argument to ret - number of funcparams and locals
+ 	-- pop argument to ret - number of funcparams
+	-- locals freed by block exit
+	self:codeImm(#self.paramsTypes["params"])
 	print(pt.pt(PUG.code))
+	return retType
+end
+
+function PUG:foldParamsTypes(lst)
+	local paramsTypes = {}
+	paramsTypes["params"] = {}
+	paramsTypes["types"] = {}
+	if #lst ~= 0 then
+		paramsTypes["params"][#paramsTypes["params"] + 1] = lst[1]
+		paramsTypes["types"][#paramsTypes["types"] + 1] = lst[2].typeval
+		for i = 3,#lst,2 do
+			paramsTypes["params"][#paramsTypes["params"] + 1] = lst[i]
+			paramsTypes["types"][#paramsTypes["types"] + 1] = lst[i+1].typeval
+		end
+	end
+	if #paramsTypes["params"] ~= #paramsTypes["types"] then
+		error("typeCheckError: number of parameters and their types is not equal")
+	end
+	return paramsTypes
 end
 
 function PUG:codeGenFuncDef(ast)
 	if ast.tag ~= "funcDef" then
-		error("codeGenError: ast is malformed - no funcDef ast tag at function level")
+		error("syntaxError: AST is malformed - no funcDef ast tag at function level")
 	end
 	local funcName = ast.funcName
 	local funcDef = self.funcDefs[funcName]
 	if funcDef then
 		if funcDef.isProto then
-			print("Detected function defintion for function prototype. Verifying number of parameters match...")
-			if #funcDef.params ~= #ast.paramsList or (funcDef.defaultAst == nil and ast.defaultVal)
+			print("Detected function defintion for function prototype. Verifying return type and number of parameters match...")
+			if funcDef.retType ~= ast.retType then
+				error("typeCheckError: mismatch between previous function prototype return type and function definition: " .. funcName)
+			end
+			if #funcDef.paramsTypes["params"] ~= #ast.paramsList or (funcDef.defaultAst == nil and ast.defaultVal)
 				or (funcDef.defaultAst and ast.defaultVal == nil) then
-				error("codeGenError: mismatch between previous function prototype of function and function definition: " .. funcName)
+				error("typeCheckError: mismatch between previous function prototype of function and function definition: " .. funcName)
 			end
 			if not ast.body then
 				print("Detected multiple compatible function proototypes for function: " .. funcName .. " Ignoring...")
 				return
 			end
+			self.paramsTypes = funcDef.paramsTypes
+			self.code = funcDef.code 
+			self.locals = funcDef.locals
+			self.localsTypes = funcDef.localsTypes
+			self.localsCountsList = funcDef.localsCountsList
+			self.retType = funcDef.retType
 			self:codeGenFuncDefBody(ast)
 			return
 		elseif ast.body then
-			error("codeGenError: multiple definition of function definition: " .. funcName)
+			error("typeCheckError: multiple definition of function definition: " .. funcName)
 		else
 			print("Detected compatible function proototype for function: " .. funcName .. " after function definition.")
-			print("Verifying number of parameters...")
-			if #funcDef.params ~= #ast.paramsList or (funcDef.defaultAst == nil and ast.defaultVal)
+			print("Verifying return type and number of parameters...")
+			if funcDef.retType ~= ast.retType then
+				error("typeCheckError: mismatch between previous function prototype return type and function definition: " .. funcName)
+			end
+			if #funcDef.paramsTypes["params"] ~= #ast.paramsList or (funcDef.defaultAst == nil and ast.defaultVal)
 				or (funcDef.defaultAst and ast.defaultVal == nil) then
-				error("codeGenError: mismatch between previous function defintion of function and function prototype: " .. funcName)
+				error("typeCheckError: mismatch between previous function defintion of function and function prototype: " .. funcName)
 			end
 			print("Ignoring redundant function prototype for function: " .. funcName .. " after function definition.")
 			return
@@ -763,37 +1055,49 @@ function PUG:codeGenFuncDef(ast)
 	local funcDef = self.funcDefs[funcName]
 	self.funcAddr[#self.funcAddr + 1] = funcName
 	print("Generating code for function " ..funcName .. "()")
-	funcDef.params = ast.paramsList
+	funcDef.retType = ast.retType.typeval 
+	funcDef.paramsTypes = self:foldParamsTypes(ast.paramsList)
 	local hashTable = {}
-	for i = 1,#funcDef.params do
-		if hashTable[funcDef.params[i]] then
-			error("codeGenerror error: function parameter '" .. funcDef.params[i] .. "' is repeated in parameter list of function: " .. funcName)
+	for i = 1,#funcDef.paramsTypes["params"] do
+		if hashTable[funcDef.paramsTypes["params"][i]] then
+			error("declarationError: function parameter '" .. funcDef.paramsTypes["params"][i] 
+				.. "' is repeated in parameter list of function: " .. funcName)
 		end
-		hashTable[funcDef.params[i]] = true
+		hashTable[funcDef.paramsTypes["params"][i]] = true
+		local pType = funcDef.paramsTypes["types"][i]
+		if string.sub(pType, #pType-1, #pType) == "[]" then
+			error("typeCheckError: function parameters cannot be of array type")
+		end
 	end
 	if ast.defaultVal then
 		funcDef.defaultAst = ast.defaultVal
 	end
 	funcDef.code = {}
 	funcDef.locals = {}
+	funcDef.localsTypes = {}
+	funcDef.localsCountsList = {}
 	funcDef.funcAddr = #self.funcAddr
 	-- main cannot take any params
-	if funcName == "main" and #funcDef.params ~= 0 then
-		error("codeGenError: main() cannot take any parameters")
+	if funcName == "main" and #funcDef.paramsTypes["params"] ~= 0 then
+		error("typeCheckError: main() cannot take any parameters")
 	end
-	self.params = funcDef.params
+	self.paramsTypes = funcDef.paramsTypes
 	self.code = funcDef.code 
 	self.locals = funcDef.locals
+	self.localsTypes = funcDef.localsTypes
+	self.localsCountsList = funcDef.localsCountsList
+	self.retType = funcDef.retType
 	if not ast.body then
 		print("Detected function prototype for function: " .. funcName)
 		funcDef.isProto = true
 		return
 	end
 	self:codeGenFuncDefBody(ast)
+	return "void"
 end
 function PUG:codeGen(ast)
 	if ast.tag ~= "program" then
-		error("codeGenError: ast is malformed - no program ast tag at root level")
+		error("syntaxError: AST is malformed - no program ast tag at root level")
 	end
 	for i = 1,#ast.funcDefList do
 		self:codeGenFuncDef(ast.funcDefList[i])
@@ -801,7 +1105,7 @@ function PUG:codeGen(ast)
 	-- Note no func call to main since main cannot take parameters in the PUG language
 	for g,_ in pairs(self.globals) do
 		if self.funcDefs[g] then
-			error("codeGenError: function and global variable have same name: " .. g)
+			error("declarationError: function and global variable have same name: " .. g)
 		end
 	end
 end
@@ -824,6 +1128,9 @@ function PUG:runFunc(funcDef, top)
 	local base = top
 
 	while true do
+		if top == 0 then
+			print(pc)
+		end
 		if code[pc] == "ret" then
 			local retval = self.stack[top]
 			top = top - code[pc+1]
@@ -851,6 +1158,10 @@ function PUG:runFunc(funcDef, top)
 			value = self.stack[base - #funcDef.locals - code[pc+1] + 1]
 			top = top + 1
 			self.stack[top] = value
+			pc = pc + 2
+		elseif code[pc] == "pstore" then
+			self.stack[base - #funcDef.locals - code[pc+1] + 1] = self.stack[top]
+			top = top - 1
 			pc = pc + 2
 		elseif code[pc] == "lstore" then
 			self.stack[base - code[pc+1] + 1] = self.stack[top]
@@ -971,8 +1282,23 @@ function PUG:runFunc(funcDef, top)
 			top = top - 1
 		elseif code[pc] == "jmp" then
 			pc = pc + code[pc+1] + 1
-		elseif code[pc] == "arrayset" or code[pc] == "larrayset" then
-			local array = 1
+		elseif code[pc] == "arrayalloc" or code[pc] == "larrayalloc" then 
+			local array = true
+			if code[pc] == "arrayalloc" then
+				self.mem[code[pc+1]] = self.stack[top]
+				top = top - 1
+				array = self.mem[code[pc+1]]
+			elseif code[pc] == "larrayalloc" then
+				self.stack[base - code[pc+1] + 1] = self.stack[top]
+				top = top - 1
+				array = self.stack[base - code[pc+1] + 1]
+			else
+				error("codeGenInternalError: array codeGen is neither arrayalloc nor larrayalloc: " .. code[pc])
+			end
+			local dim = code[pc+2]
+			pc = pc + 3 -- opcode + arraybase + dim
+		elseif code[pc] == "arrayset" or code[pc] == "larrayset"then
+			local array = true
 			if code[pc] == "arrayset" then
 				array = self.mem[code[pc+1]]
 			elseif code[pc] == "larrayset" then
@@ -982,22 +1308,29 @@ function PUG:runFunc(funcDef, top)
 			end
 			local dim = code[pc+2]
 			local index = -1
-			for i = 1,dim-1 do
+			for i = dim,2,-1 do
 				index = self.stack[top + 1 - i]
-				if index <= 0 then
+				if type(index) == "table" then
+					error("runTimeError: array index is a lua table: " .. pt.pt(index))
+				elseif index <= 0 then
 					error("runTimeError: array index is less than 1: " .. tostring(index))
 				end
 				array = array[index]
+				if type(array) ~= "table" then
+					error("runTimeError: array is not a lua table: " .. type(array))
+				end
 			end
-			index = self.stack[top + 1 - dim]
-			if index <= 0 then
+			index = self.stack[top]
+			if type(index) == "table" then
+				error("runTimeError: array index is a lua table: " .. pt.pt(index))
+			elseif index <= 0 then
 				error("runTimeError: array index is less than 1: " .. tostring(index))
 			end
 			array[index] = self.stack[top - dim]
-			top = top - dim - 1 -- 'dim' indices and rvalue on stack to be set
-			pc = pc + 3 -- opcode + dim + arraybase
+			top = top - dim - 1 -- 'dim' indices + value being set
+			pc = pc + 3 -- opcode + arraybase + dim
 		elseif code[pc] == "arrayget" or code[pc] == "larrayget" then
-			local array = 1
+			local array = true 
 			if code[pc] == "arrayget" then
 				array = self.mem[code[pc+1]]
 			elseif code[pc] == "larrayget" then
@@ -1007,15 +1340,25 @@ function PUG:runFunc(funcDef, top)
 			end
 			local dim = code[pc+2]
 			local index = -1
-			for i = 1,dim-1 do
+			for i = dim,2,-1 do
 				index = self.stack[top + 1 - i]
 				if index <= 0 then
 					error("runTimeError: array index is less than 1: " .. tostring(index))
 				end
+				if type(index) == "table" then
+					error("runTimeError: array index is a lua table: " .. pt.pt(index))
+				elseif index <= 0 then
+					error("runTimeError: array index is less than 1: " .. tostring(index))
+				end
 				array = array[index]
+				if type(array) ~= "table" then
+					error("runTimeError: array is not a lua table: " .. type(array))
+				end
 			end
-			index = self.stack[top + 1 - dim]
-			if index <= 0 then
+			index = self.stack[top]
+			if type(index) == "table" then
+				error("runTimeError: array index is a lua table: " .. pt.pt(index))
+			elseif index <= 0 then
 				error("runTimeError: array index is less than 1: " .. tostring(index))
 			end
 			local rvalue = array[index]
