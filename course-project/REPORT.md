@@ -3,6 +3,7 @@
 ## Language Syntax
 
 In this section, describe the overall syntax of your language.
+Here is a brief description of the syntax
 
 ## New Features/Changes
 

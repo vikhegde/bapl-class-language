@@ -1,9 +1,3 @@
-
-
--- TODO
--- nested blocks
--- writeup
-
 local lpeg = require"lpeg"
 local pt = require"pt"
 
@@ -487,7 +481,7 @@ end
 	
 
 function PUG:codeGenExp(ast)
-	local retType = "noType"
+	local retType = "unknownType"
 	if ast.tag == "var" then
 		-- locals, then function parameters then globals
 		local resolved = false
@@ -584,14 +578,14 @@ function PUG:codeGenExp(ast)
 	else 
 		error("syntaxError - malformed AST - unrecognized ast tag: " .. ast.tag)
 	end
-	if retType == "noType" or retType == nil then
+	if retType == "unknownType" or retType == nil then
 		error("typeCheckError: expression has no type: " .. pt.pt(ast))
 	end
 	return retType
 end
 
 function PUG:codeGenLvalue(ast)
-	local retType = "noType"
+	local retType = "unknownType"
 	if ast.tag == "var" then
 		if ast["decltype"] then
 			if ast.name then
@@ -865,7 +859,7 @@ end
 --]]
 
 function PUG:codeGenStat(ast)
-	local retType = "notype"
+	local retType = "unknownType"
 	if ast.tag == "assign" then
 		local ret1 = self:codeGenExp(ast.rvalue)
 		local ret2 = self:codeGenLvalue(ast.lvalue)
