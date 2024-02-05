@@ -13,7 +13,7 @@ local MAXSYNTAXLINECONTEXT = 4
 
 -- Pattern for filler text like space and comments - has no capture 
 local maxPos = -1
-local maxLine = 0
+local maxLine = 1 
 local space = lpeg.S" \n\t"
 local blockcmnt = lpeg.P("#{") * ((lpeg.P(1) - lpeg.P("#}"))^0) * lpeg.P("#}") 
 local linecmnt = lpeg.P("#") * ((lpeg.P(1) - lpeg.P("\n"))^0) * lpeg.P("\n") 
@@ -138,7 +138,7 @@ local function syntaxError(inputText, lineNum, errorPos)
 end
 
 -- List of keywords
-local keywords = { "and", "or", "if", "elseif", "else", "while", "do", "function", "local", "new", "return", "num", "arrayof", "void"}
+local keywords = { "if", "elseif", "else", "while", "do", "function", "local", "new", "return", "num", "arrayof", "void"}
 local reserved_words = keywords
 local reserved_words_pattern = lpeg.P(false)
 for i = 1,#reserved_words do
@@ -163,7 +163,7 @@ end
 
 	
 -- Pattern for logical operators
-local opLogical = (KEYWORD("and") + KEYWORD("or")) * whitespace
+local opLogical = lpeg.C(lpeg.P("&&") + "||") * whitespace
 
 -- Fold functions
 local function foldBin(lst)
@@ -491,7 +491,8 @@ function PUG:codeGenExp(ast)
 	if ast.tag == "var" then
 		-- locals, then function parameters then globals
 		local resolved = false
-		for i = 1,#self.locals do
+		-- reverse order to access nearest scope
+		for i = #self.locals,1,-1 do
 			if self.locals[i] == ast.name then
 				self:codeInstr("lload")
 				self:codeImm(i)
@@ -522,6 +523,7 @@ function PUG:codeGenExp(ast)
 		end
 	elseif ast.tag == "binaryOp" then
 		local ret1 = self:codeGenExp(ast.exp1)
+		print(pt.pt(ast))
 		local ret2 = self:codeGenExp(ast.exp2)
 		if ret1 ~= ret2 then
 			error("TypeCheck: type mismatch between LHS (" .. ret1 .. ") and RHS (" .. ret2 .. ") of binary op: " .. ast.op)
@@ -628,13 +630,24 @@ function PUG:codeGenLvalue(ast)
 		else
 			if ast.name then
 				local resolved = false
-				for i = 1,#self.paramsTypes["params"] do
-					if self.paramsTypes["params"][i] == ast.name then
-						self:codeInstr("pstore")
+				for i = #self.locals,1,-1 do
+					if self.locals[i] == ast.name then
+						self:codeInstr("lstore")
 						self:codeImm(i)
 						resolved = true
-						retType = self.paramsTypes["types"][i]
+						retType = self.localsTypes[i]
 						break
+					end
+				end
+				if not resolved then
+					for i = 1,#self.paramsTypes["params"] do
+						if self.paramsTypes["params"][i] == ast.name then
+							self:codeInstr("pstore")
+							self:codeImm(i)
+							resolved = true
+							retType = self.paramsTypes["types"][i]
+							break
+						end
 					end
 				end
 				if not resolved and not self.globals[ast.name] then
@@ -651,9 +664,13 @@ function PUG:codeGenLvalue(ast)
 	elseif ast.tag == "lvar" then
 		if ast["decltype"] then
 			if ast.name then
-				if self.localsTypes[ast.name] then
-					error("declarationError: new type declaration found for a local that was declared previously")
-				elseif string.sub(ast["decltype"].typeval, #ast["decltype"].typeval - 1, #ast["decltype"].typeval) == "[]" then
+				for i = self.localsCountsList[#self.localsCountsList],1,-1 do
+					if self.locals[i] == ast.name then
+					    error("declarationError: new type declaration found for a local that was declared previously in same scope")
+					    break
+					end
+				end
+				if string.sub(ast["decltype"].typeval, #ast["decltype"].typeval - 1, #ast["decltype"].typeval) == "[]" then
 					local arraytype = ast["decltype"].typeval
 					local dim = 0
 					for i = 4,#arraytype,2 do
@@ -686,6 +703,8 @@ function PUG:codeGenLvalue(ast)
 				error("syntaxError: malformed AST: new typed declaration for a local with no name ast element")
 			end
 		else
+			error("syntaxError: malformed AST: lvalue lvar ast with no decltype element")
+			--[[
 			if ast.name then
 				self:codeInstr("lstore")
 				self:codeImm(#self.locals)
@@ -693,6 +712,7 @@ function PUG:codeGenLvalue(ast)
 			else
 				error("syntaxError: malformed AST: lvalue local var ast with no name ast element")
 			end
+			--]]
 		end
 	elseif ast.tag == "array" then
 		if not ast.indexTree then
@@ -712,9 +732,11 @@ function PUG:codeGenLvalue(ast)
 				break
 			end
 		end
-		for i = 1,#self.paramsTypes["params"] do
-			if self.paramsTypes["params"][i] == ast.array then
-				error("typeCheckError: array name (" .. ast.array ..") matches a function parameter. Arrays are not allowed as function parameters")
+		if not resolved then
+			for i = 1,#self.paramsTypes["params"] do
+				if self.paramsTypes["params"][i] == ast.array then
+					error("typeCheckError: array name (" .. ast.array ..") matches a function parameter. Arrays are not allowed as function parameters")
+				end
 			end
 		end
 		if not resolved then
@@ -830,6 +852,7 @@ function PUG:codeGenIfElseStat(ast)
 	return "void"
 end
 
+--[[
 function PUG:codeGenVar(ast)
 	if ast.tag ~= "var" then
 		error("syntaxError: malformed AST:  var ast tag not found in var code statement: " .. ast.tag)
@@ -839,6 +862,7 @@ function PUG:codeGenVar(ast)
 	self:codeImm(1)
 	return retType
 end
+--]]
 
 function PUG:codeGenStat(ast)
 	local retType = "notype"
@@ -899,12 +923,14 @@ function PUG:codeGenStat(ast)
 		--locals freed by block exit
 		self:codeImm(#self.paramsTypes["params"]) 
 	elseif ast.tag == "var" then
-		error("This should not happen")
+		error("This code should not be reached")
+		--[[
 		local expType = self:codeGenVar(ast)
 		if expType == nil then
 			error("typeCheckError: rvalue has no type" .. pt.pt(ast.rvalue))
 		end
 		retType = "void"
+		--]]
 	elseif ast.tag == "voidstat" then
 		if ast.rvalue == nil then
 			error("typeCheckError: cast to void for nonexistent rvalue")
@@ -928,10 +954,8 @@ function PUG:codeGenStat(ast)
 			error("typeCheckError: rvalue has no type" .. pt.pt(ast.rvalue))
 		end
 		if expType ~= "void" then
-			error("typeCheckError: rvalue statement is only valid if it is of type void: type " .. expType)
+			error("typeCheckError: rvalue-statement (not same as a void-cast-rvalue-statement) is only valid if it is is of type void: type " .. expType)
 		end
-		self:codeInstr("pop")
-		self:codeImm(1)
 		retType = expType
 	elseif ast.tag == "block" then
 		retType = self:codeGenBlock(ast)
@@ -965,8 +989,6 @@ function PUG:codeGenBlock(ast)
 	for i = 1,self.localsCountsList[#self.localsCountsList] do
 		self.locals[i] = nil
 		self.localsTypes[i] = nil
-		self:codeInstr("pop")
-		self:codeImm(1)
 	end
 	self.localsCountsList[#self.localsCountsList] = nil
 	-- block returns void type
@@ -1011,16 +1033,17 @@ function PUG:codeGenFuncDef(ast)
 		error("syntaxError: AST is malformed - no funcDef ast tag at function level")
 	end
 	local funcName = ast.funcName
+	self.funcName = funcNamw
 	local funcDef = self.funcDefs[funcName]
 	if funcDef then
 		if funcDef.isProto then
 			print("Detected function defintion for function prototype. Verifying return type and number of parameters match...")
-			if funcDef.retType ~= ast.retType then
+			if funcDef.retType ~= ast.retType.typeval then
 				error("typeCheckError: mismatch between previous function prototype return type and function definition: " .. funcName)
 			end
-			if #funcDef.paramsTypes["params"] ~= #ast.paramsList or (funcDef.defaultAst == nil and ast.defaultVal)
+			if (2 * #funcDef.paramsTypes["params"] ~= #ast.paramsList) or (funcDef.defaultAst == nil and ast.defaultVal)
 				or (funcDef.defaultAst and ast.defaultVal == nil) then
-				error("typeCheckError: mismatch between previous function prototype of function and function definition: " .. funcName)
+				error("typeCheckError: mismatch between number and/or type(s) of parameters of previous function prototype of function and function definition: " .. funcName)
 			end
 			if not ast.body then
 				print("Detected multiple compatible function proototypes for function: " .. funcName .. " Ignoring...")
@@ -1080,6 +1103,10 @@ function PUG:codeGenFuncDef(ast)
 	-- main cannot take any params
 	if funcName == "main" and #funcDef.paramsTypes["params"] ~= 0 then
 		error("typeCheckError: main() cannot take any parameters")
+	elseif funcName == "main" and funcDef.retType == "void" then
+		error("typeCheckError: main() cannot return void")
+	elseif funcName == "main" and funcDef.retType ~= "num" then
+		error("typeCheckError: main() can only return type num and not " .. funcDef.retType)
 	end
 	self.paramsTypes = funcDef.paramsTypes
 	self.code = funcDef.code 
@@ -1093,15 +1120,23 @@ function PUG:codeGenFuncDef(ast)
 		return
 	end
 	self:codeGenFuncDefBody(ast)
-	return "void"
+	return "void" 
 end
 function PUG:codeGen(ast)
 	if ast.tag ~= "program" then
 		error("syntaxError: AST is malformed - no program ast tag at root level")
 	end
+	local hasMain = false
 	for i = 1,#ast.funcDefList do
 		self:codeGenFuncDef(ast.funcDefList[i])
+		if self.funcDefs["main"] then
+			hasMain = true
+		end
 	end
+	if not hasMain then
+		error("syntaxError: program has no main() function")
+	end
+
 	-- Note no func call to main since main cannot take parameters in the PUG language
 	for g,_ in pairs(self.globals) do
 		if self.funcDefs[g] then
@@ -1128,9 +1163,6 @@ function PUG:runFunc(funcDef, top)
 	local base = top
 
 	while true do
-		if top == 0 then
-			print(pc)
-		end
 		if code[pc] == "ret" then
 			local retval = self.stack[top]
 			top = top - code[pc+1]
@@ -1168,7 +1200,7 @@ function PUG:runFunc(funcDef, top)
 			top = top - 1
 			pc = pc + 2
 		elseif code[pc] == "prt" then
-			print("PUG stdout: =========> " .. self.stack[top])
+			print("PUG stdout: =========> " .. pt.pt(self.stack[top]))
 			top = top - 1
 			pc = pc + 1 
 		elseif code[pc] == "load" then

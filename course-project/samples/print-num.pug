@@ -1,0 +1,12 @@
+num function factorial (n: num, last: num = 2)
+{
+	if (n == 0) {
+		return last;
+        } else {
+                return n * factorial(n-1, last);
+        };
+}
+num function main()
+{
+     @factorial(6);
+}

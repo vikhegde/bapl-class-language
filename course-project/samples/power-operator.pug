@@ -1,0 +1,15 @@
+num function funcPower8()
+{
+    # returns 8
+    return 2 ^ 3;
+}
+num function funcPower2()
+{
+    # returns 2
+    return (2 ^ 0) + 1;
+}
+num function main ()
+{
+    # 2 raised to the power of product of two function calls
+    @2 ^ (funcPower8() * funcPower2());	
+}
